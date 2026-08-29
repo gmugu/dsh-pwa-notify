@@ -475,6 +475,75 @@ export function handleVapid(pushState, req, res) {
 }
 
 // ---------------------------------------------------------------------------
+// Raw index.html transforms (webServer.tapIndex): the escape hatch for the
+// viewport meta and manifest link, which no structured injection row can
+// EDIT (rows only append). Lessons ported from zen-remote's gateway:
+//   - env(safe-area-inset-*) stays 0 until the viewport meta carries
+//     viewport-fit=cover, and patching it client-side is too late for the
+//     cold-start frame — it must be in the HTML itself;
+//   - a document honors the FIRST rel=manifest link; the app ships its own
+//     generic /manifest.webmanifest (display:fullscreen), so ours must be
+//     the only one to govern installs deterministically.
+// ---------------------------------------------------------------------------
+
+const VIEWPORT_META = '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">'
+const STATUS_BAR_META = '<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">'
+
+/** Ensure the viewport meta carries viewport-fit=cover (replace or insert). */
+export function coverViewport(html) {
+  const re = /<meta\b[^>]*\bname\s*=\s*["']?viewport["']?[^>]*>/i
+  if (re.test(html)) return html.replace(re, VIEWPORT_META)
+  const headOpen = html.search(/<head[^>]*>/i)
+  if (headOpen < 0) return html
+  const at = html.indexOf('>', headOpen) + 1
+  return html.slice(0, at) + VIEWPORT_META + html.slice(at)
+}
+
+/** Drop manifest links other than this plugin's (ours renders FIRST via the
+ * structured injection, which runs before tapIndex — so it must survive). */
+export function stripExistingManifestLink(html) {
+  return html.replace(/<link\b[^>]*\brel\s*=\s*["']?manifest["']?[^>]*>\s*/gi, (tag) =>
+    tag.includes(BASE + '/manifest.json') ? tag : '',
+  )
+}
+
+/** iOS standalone status bar: translucent over the app background (needs the
+ * viewport-fit=cover above; the safe-area CSS pads content below it). */
+export function addStatusBarMeta(html) {
+  if (/apple-mobile-web-app-status-bar-style/i.test(html)) return html
+  return html.replace(VIEWPORT_META, VIEWPORT_META + STATUS_BAR_META)
+}
+
+/** All index.html shims in one pass (registered via webServer.tapIndex). */
+export function adaptIndexHtml(html) {
+  return addStatusBarMeta(stripExistingManifestLink(coverViewport(html)))
+}
+
+// Safe-area shell CSS for the installed PWA. Scoped to display-mode:
+// standalone so desktop and browser tabs are pixel-identical to stock.
+// The app is html,body,#root{height:100%} WITHOUT a global border-box, so
+// body padding must switch to border-box or it adds a scrollable strip
+// (content-box padding + height:100% overflows). Slot wrappers are
+// display:contents — padding there is discarded (zen-remote measured it) —
+// so body is the reliable whole-frame box.
+const SAFE_AREA_CSS = `/* dsh-pwa-notify · installed-PWA iOS shell adaptation */
+@media (display-mode: standalone) {
+  html {
+    scroll-padding-bottom: max(env(safe-area-inset-bottom), 0px);
+  }
+  body {
+    box-sizing: border-box;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left) !important;
+    overscroll-behavior-y: none;
+  }
+  /* iOS zooms the whole page when a focused input's font is <16px. */
+  [data-slot="conversation"] input,
+  [data-slot="conversation"] textarea {
+    font-size: max(16px, 1em);
+  }
+}`
+
+// ---------------------------------------------------------------------------
 // Static PWA assets, served by the DSH host itself (no gateway, like
 // zen-remote's lan-gate does for its /pwa/* set).
 // ---------------------------------------------------------------------------
@@ -844,6 +913,9 @@ export function apply(ctx, config = {}) {
         }),
       'dsh-pwa-notify: pwa routes',
     )
+    // Raw index.html shims: viewport-fit=cover (first-frame safe areas),
+    // strip the app's own generic manifest link, iOS status-bar style.
+    webCtx.effect(() => webCtx.webServer.tapIndex(adaptIndexHtml), 'dsh-pwa-notify: index shims')
   })
 
   // --- Manifest link + theme color + VAPID key in index.html -----------------
@@ -854,6 +926,7 @@ export function apply(ctx, config = {}) {
         placement: 'head',
         html: `<link rel="manifest" href="${BASE}/manifest.json"><meta name="theme-color" content="#0f1115">`,
       })
+      table.push({ kind: 'style', text: SAFE_AREA_CSS })
       // The VAPID public key, fresh at emit time (first boot generates it
       // before the first index render can happen).
       if (cfg.push && pushState !== null) {

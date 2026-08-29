@@ -22,6 +22,7 @@
 - **工具名是 `notify_user` 不是 `push_notify`**：刻意与 dsh-zen-remote 区分（避免同装冲突）。注册包 try/catch：与部署里同名工具撞名时降级为告警，不许把插件行带崩。
 - **schemastery 依赖只经 symlink**：`node_modules/@deepseek-ai/schemastery → 宿主 dsh 安装内的同名包`（dsh-login-gate 同款做法），供 `settings.register` 的 schema 使用；包声明为 optional peerDependency，npm 安装场景由 profile 图解析。**不要**在包里 npm install 真实依赖，也不要删除这个 symlink（settings 命名空间会挂）。
 - **设置是双层的**：用户层（开关 + 文案模板）走 `settings.register('dsh-pwa-notify', SettingsSchema)`，`scope.watch` 热更新 `apply` 里的 `cfg`；行配置只提供静态项（grace/debounce/subject/push/tool）和 `turnEndPush`/`includeSummary` 的 base 初始值。`renderTexts` 是纯函数，`decideNotification` 和 `/test` 预览共用——改文案逻辑必须同时过两边的测试。
+- **index.html 改写走 tapIndex，注入走 index-inject**：viewport meta / manifest link 这类要**编辑既有标签**的改动只能用 `webServer.tapIndex`（结构化注入行只会追加）；tapIndex 在注入之后运行，`stripExistingManifestLink` 必须保留自己的 `/_dsh/pwa-notify/manifest.json`（先注入=第一个=被浏览器采用）。安全区 CSS 打在 `body` 上且必须 `box-sizing:border-box`——app 是 `html,body,#root{height:100%}` 无全局 border-box，content-box padding 会多出一条可滚动溢出条；slot 包装层是 display:contents，padding 无效（zen-remote 实测）。CSS 全部包在 `@media (display-mode: standalone)` 里，桌面/标签页逐像素不变。
 - **图标是生成物**：改 `scripts/gen-icons.mjs` 后跑 `npm run icons` 并提交 `pwa/icons/`。PNG 编码器手写在脚本里（CRC32 + zlib），别引入 sharp 之类的依赖。
 
 ## 3. 加载与工作机制
@@ -43,7 +44,7 @@
 ## 4. 命令
 
 ```sh
-npm test        # node --test：18 个用例（策略、开关、文案模板、路由、RFC 8291 向量、VAPID JWT、推送广播）
+npm test        # node --test：21 个用例（策略、开关、文案模板、路由、index 改写、RFC 8291 向量、VAPID JWT、推送广播）
 npm run icons   # 重新生成 pwa/icons/*.png
 ```
 

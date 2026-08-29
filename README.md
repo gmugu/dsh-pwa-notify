@@ -12,6 +12,7 @@
 - **PWA 化**：DSH host 直接托管 `manifest.json` + service worker + 图标（`/_dsh/pwa-notify/*`），通过官方的 `webserver/index-inject` 事件把 `<link rel="manifest">` 注入页面。手机浏览器菜单里「添加到主屏幕」即可装成 App。
 - **真·Web Push**：HTTPS 访问时，页面/主屏 PWA 用 VAPID 公钥订阅推送；智能体需要你时 DSH host 直接向推送服务（FCM/APNs/Mozilla 的系统级通道）发出 aes128gcm 端到端加密通知——**即使 App 已被 iOS 杀掉也能到锁屏**。
 - **推送是唯一通知通道**（轮询兜底已按需移除）：简单、零常驻请求；代价是一条推送发送失败即丢失（无兜底重放）——设备下次打开应用时会自动重新订阅，自愈。`notify_user` 工具的 `delivered` 返回真实送达数（推送服务 2xx 计数）。
+- **iPhone 底部/全面屏适配**（仅作用于已安装的主屏 PWA，浏览器标签页与桌面零影响）：`viewport-fit=cover` 直接写进 HTML（首帧生效，晚于首帧的客户端补丁来不及）、body 以 border-box + `env(safe-area-inset-*)` 四边留白——输入框不再被 Home 横条压住；状态栏改为沉浸式黑透、输入框字体 ≥16px 防 iOS 聚焦缩放、关闭下拉误刷新。
 - **设置界面**：DSH 设置页新增「通知推送」卡片——三类推送开关（等授权 / 等回答 / 回合完成）、对话摘要开关、六条文案模板自定义（`{tool}` / `{question}` / `{summary}` 变量）、按当前模板发真通知的测试按钮、订阅设备数。改完即时生效，持久化在 DSH 的设置存储里，不用重启。
 - **`notify_user` 模型工具**：模型可以在关键节点主动唤起一条通知（严格限流：每会话 60 秒 1 条、全局每小时 20 条），并附带系统提示词引导，防止它每回合都喊。
 

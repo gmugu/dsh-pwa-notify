@@ -11,6 +11,9 @@ import { join } from 'node:path'
 import { createPushState } from '../src/webpush.js'
 import {
   decideNotification,
+  adaptIndexHtml,
+  coverViewport,
+  stripExistingManifestLink,
   renderTemplate,
   renderTexts,
   DEFAULT_TEXTS,
@@ -156,6 +159,34 @@ test('decideNotification honors toggles and custom texts', () => {
   assert.equal(d.title, '要授权啦')
   // legacy CFG without the new keys keeps old behavior (backwards compat)
   assert.equal(decideNotification({ kind: 'approval', now: 1, lastSent: 0, toolName: 'bash' }, CFG).body, 'bash 需要授权才能继续')
+})
+
+// --- index.html shims (tapIndex) ------------------------------------------------
+
+const SAMPLE_INDEX = `<!doctype html><html lang="en"><head><meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <title>DeepSeek Harness</title></head><body><div id="root"></div></body></html>`
+
+test('adaptIndexHtml: viewport-fit=cover, status-bar meta, own manifest survives, app manifest stripped', () => {
+  const out = adaptIndexHtml(SAMPLE_INDEX)
+  assert.match(out, /<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">/)
+  assert.match(out, /apple-mobile-web-app-status-bar-style/)
+  assert.doesNotMatch(out, /\/manifest\.webmanifest/)
+  // idempotent: applying twice changes nothing
+  assert.equal(adaptIndexHtml(out), out)
+})
+
+test('coverViewport inserts a meta when the page ships none', () => {
+  const out = coverViewport('<html><head><title>x</title></head></html>')
+  assert.match(out, /viewport-fit=cover/)
+})
+
+test('stripExistingManifestLink keeps this plugin link, drops others', () => {
+  const html = '<link rel="manifest" href="/_dsh/pwa-notify/manifest.json"><link rel="manifest" href="/manifest.webmanifest">'
+  const out = stripExistingManifestLink(html)
+  assert.match(out, /_dsh\/pwa-notify\/manifest\.json/)
+  assert.doesNotMatch(out, /manifest\.webmanifest/)
 })
 
 // --- route handlers ---------------------------------------------------------
