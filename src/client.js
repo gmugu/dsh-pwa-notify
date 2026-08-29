@@ -8,18 +8,14 @@
  *   2. asks for notification permission through an opt-in bottom card
  *      (7-day snooze, iOS installed-PWA hint — the flow dsh-zen-remote's
  *      pwa/inject.js proved out);
- *   3. subscribes to REAL Web Push with the VAPID key the host injects into
- *      the page (__DSH_PWA_NOTIFY_VAPID__) — iOS only allows this from a
- *      home-screen install, never a Safari tab, so the card guides there;
- *   4. polls /_dsh/pwa-notify/poll?since=<seq> as the fallback channel and
- *      shows whatever the host's policy decided through the service worker
- *      while the page runs in the background (skipped once push is live, so
- *      the two channels never double-notify).
+ *   3. subscribes to Web Push with the VAPID key the host injects into the
+ *      page (__DSH_PWA_NOTIFY_VAPID__) — iOS only allows this from a
+ *      home-screen install, never a Safari tab, so the card guides there.
  *
- * Display rule for the poll channel: when the page is HIDDEN every item
- * notifies; when VISIBLE only approval/question items do (they may belong to
- * a session the user is not looking at). The push channel always notifies —
- * the SW's push event fires regardless of page state.
+ * Push is the ONLY notification transport (the earlier poll fallback was
+ * removed by design): the SW's push event displays everything, and this page
+ * code has no display path of its own at all. Returning visitors with
+ * permission already granted silently resync their subscription.
  *
  * Disable per browser with ?pwaNotify=0 or localStorage 'dsh-pwa-notify'='0'.
  */
@@ -33,29 +29,15 @@ window.__ModuleLoader__.load({
     const BASE = '/_dsh/pwa-notify'
     const SNOOZE_KEY = 'dsh-pwa-notify-snooze'
     const DISABLE_KEY = 'dsh-pwa-notify'
-    const CID_KEY = 'dsh-pwa-notify-cid'
     const CARD_ID = 'dsh-pwa-notify-card'
     const SNOOZE_MS = 7 * 24 * 3600 * 1000
-    // Poll channel cadence. Hidden/visible pair drives the FALLBACK channel
-    // (notifications to pages without a push subscription). Once push is
-    // live the poll demotes to a slow heartbeat: it no longer displays
-    // anything (the SW's push event owns that), it only keeps the sequence
-    // baseline fresh and acts as a dead-man check for silently broken push
-    // (expired subscription, unreachable push service) — a 5-minute-late
-    // notification beats a silently lost one.
-    const POLL_HIDDEN_MS = 8000
-    const POLL_VISIBLE_MS = 40000
-    const POLL_PUSH_READY_MS = 5 * 60 * 1000
     const ICON = BASE + '/icon-192.png'
 
     const state = {
       reg: null,
-      lastSeq: null,
-      timer: null,
       card: null,
       booted: false,
       loadListener: null,
-      visibilityListener: null,
     }
 
     // ---- environment -------------------------------------------------------
@@ -144,8 +126,6 @@ window.__ModuleLoader__.load({
         })
         if (!res.ok) return false
         state.pushReady = true
-        // Demote the poll to a heartbeat now that push owns display.
-        if (state.booted) schedule()
         return true
       } catch (err) {
         console.warn('[dsh-pwa-notify] push subscribe failed:', err)
@@ -166,19 +146,6 @@ window.__ModuleLoader__.load({
       try {
         localStorage.setItem(SNOOZE_KEY, String(Date.now()))
       } catch (_) {}
-    }
-
-    function clientId() {
-      try {
-        let cid = localStorage.getItem(CID_KEY)
-        if (!cid) {
-          cid = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : 'c-' + Date.now() + '-' + Math.random().toString(36).slice(2)
-          localStorage.setItem(CID_KEY, cid)
-        }
-        return cid
-      } catch (_) {
-        return 'c-' + Date.now()
-      }
     }
 
     // ---- service worker ----------------------------------------------------
@@ -204,58 +171,6 @@ window.__ModuleLoader__.load({
       } catch (_) {
         return null
       }
-    }
-
-    // ---- poll loop ---------------------------------------------------------
-
-    async function pollOnce() {
-      try {
-        const url = BASE + '/poll?since=' + (state.lastSeq === null ? 0 : state.lastSeq) + '&cid=' + encodeURIComponent(clientId())
-        const res = await fetch(url, { cache: 'no-store' })
-        if (!res.ok) return
-        const data = await res.json()
-        if (!data || typeof data.seq !== 'number') return
-        const first = state.lastSeq === null
-        state.lastSeq = data.seq
-        // First poll after load only adopts the current sequence — replaying
-        // history would fire a burst of stale notifications on every open.
-        if (first || !Array.isArray(data.items) || data.items.length === 0) return
-        // Push-subscribed: the SW's push event already displays these (even
-        // with the page killed); displaying again here would double-notify.
-        // The poll still runs so the sequence baseline stays fresh.
-        if (state.pushReady) return
-        const hidden = document.hidden
-        const due = data.items.filter((it) => hidden || it.kind === 'approval' || it.kind === 'question')
-        if (due.length === 0) return
-        if (permission() !== 'granted') return
-        const reg = (await swReady()) || state.reg
-        for (const it of due) {
-          const options = {
-            body: it.body || '',
-            icon: ICON,
-            badge: ICON,
-            tag: it.tag || 'dsh',
-            renotify: true,
-            data: { url: '/' },
-          }
-          if (reg && typeof reg.showNotification === 'function') reg.showNotification(it.title || 'DSH', options)
-        }
-      } catch (_) {
-        // Offline or behind a gate — tolerated; the next tick retries.
-      }
-    }
-
-    function schedule() {
-      if (state.timer !== null) clearInterval(state.timer)
-      const interval = state.pushReady ? POLL_PUSH_READY_MS : document.hidden ? POLL_HIDDEN_MS : POLL_VISIBLE_MS
-      state.timer = setInterval(pollOnce, interval)
-    }
-
-    function onVisibilityChange() {
-      // Immediate poll on hide serves the fallback channel only; a
-      // push-subscribed client hears from the SW's push event instead.
-      if (document.hidden && !state.pushReady) pollOnce()
-      schedule()
     }
 
     // ---- opt-in card (DOM, zen-remote inject.js style) ---------------------
@@ -347,7 +262,6 @@ window.__ModuleLoader__.load({
             // the subscribe call tied to the user gesture too.
             subscribePush().then(function () {
               showGrantedCard()
-              pollOnce()
             })
           }
         })
@@ -398,7 +312,6 @@ window.__ModuleLoader__.load({
           serviceWorker: !!state.reg,
           pushSubscribed: state.pushReady,
           pushAllowedHere: pushAllowedHere(),
-          lastSeq: state.lastSeq,
           secureContext: secureOk(),
         }
       },
@@ -410,10 +323,6 @@ window.__ModuleLoader__.load({
       if (state.booted) return
       state.booted = true
       registerSW()
-      pollOnce()
-      schedule()
-      state.visibilityListener = onVisibilityChange
-      document.addEventListener('visibilitychange', state.visibilityListener)
       // Returning visitor with permission already granted: resync the push
       // subscription — the host may have lost it (state reset, failed POST)
       // and a silent resync needs no prompt (zen-remote's resyncPush).
@@ -427,7 +336,8 @@ window.__ModuleLoader__.load({
         return
       }
       // Everything created here is removed when this plugin fiber stops
-      // (bundle hot-reload or removal), so no DOM/timers leak across updates.
+      // (bundle hot-reload or removal), so no DOM/listeners leak across
+      // updates.
       ctx.effect(() => {
         if (document.readyState === 'complete') boot()
         else {
@@ -437,21 +347,12 @@ window.__ModuleLoader__.load({
           window.addEventListener('load', state.loadListener, { once: true })
         }
         return () => {
-          if (state.timer !== null) {
-            clearInterval(state.timer)
-            state.timer = null
-          }
           if (state.loadListener !== null) {
             window.removeEventListener('load', state.loadListener)
             state.loadListener = null
           }
-          if (state.visibilityListener !== null) {
-            document.removeEventListener('visibilitychange', state.visibilityListener)
-            state.visibilityListener = null
-          }
           removeCard()
           state.booted = false
-          state.lastSeq = null
           state.pushReady = false
           // Best-effort: with the plugin gone, its SW has nothing left to
           // say. Unregister keeps scope '/' clean for other PWA plugins

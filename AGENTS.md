@@ -6,15 +6,16 @@
 
 `dsh-pwa-notify` 是 DSH 的一个 **bundle 插件**（一个包，两半代码，对用户是一个插件）：
 
-- **host 半边** `src/index.js`（插件行 `dsh-pwa-notify`）：PWA 静态文件路由、`session/event` / `agent/turn-stopping` 监听、通知决策与环形缓冲、`notify_user` 模型工具、`webserver/index-inject` 注入 manifest link。
-- **浏览器半边** `src/client.js`（同一插件行，经 `dsh.client` 发现）：Service Worker 注册、通知授权卡片、轮询循环、通知展示。
+- **host 半边** `src/index.js`（插件行 `dsh-pwa-notify`）：PWA 静态文件路由、`session/event` / `agent/turn-stopping` 监听、通知决策（纯函数）+ Web Push 广播、`notify_user` 模型工具、`webserver/index-inject` 注入 manifest link 与 VAPID 公钥。
+- **协议半边** `src/webpush.js`：VAPID 密钥（RFC 8292 ES256）、aes128gcm 载荷加密（RFC 8291）、订阅状态持久化与广播（404/410 自动清理）。
+- **浏览器半边** `src/client.js`（同一插件行，经 `dsh.client` 发现）：Service Worker 注册、通知授权卡片、推送订阅与回访 resync——页面自身无展示路径。
 
 ## 2. 硬约束（改动前必读）
 
 - **无构建、无依赖**：两个参考插件里，本插件走的是 dsh-mobile-hanui 的纯 JS 路线。不要引入 TypeScript / 打包器 / npm 依赖（连 `defineTool` 都是手工内联等价物——它只是 schema 包装器；Web Push 也是 node:crypto 手写，见下）。
 - **RFC 8291 已知答案向量是加密代码的唯一护栏**：`src/webpush.js` 的 `encryptPayload` 改任何一行（HKDF 接线、点编码、GCM 用法、header 布局），`test/webpush.test.mjs` 的 Appendix A 向量必须仍然逐字节通过。没有它，手写加密错了只会在真手机上静默失败。
 - **VAPID 密钥必须持久化**：`$DSH_HOME/pwa-notify-state.json` 里的密钥对一旦重新生成，所有已订阅设备全部失效。状态文件原子写（tmp+rename），`createPushState` 的状态是每实例闭包——**不要**用共享默认对象浅拷贝初始化（曾因此让一个实例的订阅漏进下一个实例）。
-- **双通道去重靠 `emit` 单一入口**：所有通知（事件腿 / 工具腿 / 测试）必须走 `apply` 里的 `emit()`（环形缓冲 + 推送广播），不要直接调 `store.push`，否则轮询通道和推送通道会对同一事件各响一次。客户端侧的对应约束：`pushReady` 后轮询只推进基线不再展示。
+- **推送是唯一通知通道**（用户决定移除轮询兜底）：事件腿统一走 `apply` 里的 `emit()`（fire-and-forget 广播）；`notify_user` 工具与 `/test` 直接 `await pushState.broadcast()` 拿真实 2xx 送达数。不要 reintroduce 缓冲/轮询通道——一条推送失败即丢失是**已接受的取舍**，设备下次打开应用时自动重订阅自愈。
 - **SW 永远不加 fetch handler**：DSH 的 JS/CSS 每次部署都变且文件名不变，任何缓存策略都会造成「新 DOM + 旧 CSS」（dsh-zen-remote sw v2→v3 的事故复盘）。本插件的 SW 只做通知展示（push 事件 + showNotification）和点击聚焦。
 - **通知策略保持「需要你才响」**：等授权 / 等回答恒开且不受 debounce 压制；回合结束默认关、子代理永远不推。这些语义来自 dsh-zen-remote 的行为变更历史（1.0.3 起回合结束默认不推），不要「顺手改默认值」。
 - **决策层必须是纯函数**：`decideNotification` / `turnSummary` / `assistantText` / `pendingQuestionText` 全部纯函数导出，测试不经真实会话（建真实会话耗 token，是工作区硬约束）。宿主侧接线（`apply`）只做薄封装。
@@ -34,13 +35,13 @@
 ### client 侧
 
 - `src/client.js` 以 `window.__ModuleLoader__.load({ id, factory })` 注册；factory 内不用 React（授权卡片是纯 DOM，样式内联，来自 zen-remote `pwa/inject.js` 的成熟形态）。
-- 轮询协议：首次 poll（`since=0`）只采纳 `seq` 基线，**不回放历史**；之后 `seq` 之后的条目在 `document.hidden` 或 kind ∈ {approval, question} 时经 `registration.showNotification()` 展示。
-- 所有 DOM / 定时器 / 监听器在 `ctx.effect` 的清理函数里拆除；插件停止时还会注销本插件的 SW（按 `scriptUrl` 路径前缀判断，不误删别人的）。
+- 页面代码**没有任何展示路径**：通知全部由 SW 的 `push` 事件展示；页面只负责注册 SW、授权卡片、订阅与回访 resync。
+- 所有 DOM / 监听器在 `ctx.effect` 的清理函数里拆除；插件停止时还会注销本插件的 SW（按 `scriptUrl` 路径前缀判断，不误删别人的）。
 
 ## 4. 命令
 
 ```sh
-npm test        # node --test：18 个用例（策略、缓冲、路由、RFC 8291 向量、VAPID JWT、推送广播）
+npm test        # node --test：15 个用例（策略、路由、RFC 8291 向量、VAPID JWT、推送广播）
 npm run icons   # 重新生成 pwa/icons/*.png
 ```
 
@@ -48,9 +49,9 @@ npm run icons   # 重新生成 pwa/icons/*.png
 
 - **手写 Web Push 而不是 `web-push` 依赖**：本插件经 `link:` 安装，pnpm 不会为 link 包装它自己的依赖；手写 RFC 8291/8292（node:crypto 全有原语）+ RFC 已知答案向量测试，比在插件目录里养第二套 node_modules 可靠。
 - **Node 的 `dsaEncoding` 有两种拼写**：`'ieee-p1363'`（v22.x 实测）与 `'ieee-p1363-format'`（上游），`es256RawSign` 两种都试。undici 的 fetch **不允许手设 `Content-Length`**（报 invalid content-length header），长度由 body 自动推导。
-- **轮询而非 SSE/WebSocket**：SSE 长连接在后台标签页会被浏览器掐掉，轮询更抗 throttling。推送订阅成功后轮询**降为 5 分钟心跳**（不展示，只保基线 + 推送静默失败的安全网——大陆服务器直连 FCM 不通、订阅过期都是真实场景）；展示通道由 SW 的 push 事件独占。
+- **移除轮询是用户决策**：安全网（FCM 不可达、订阅过期时开着的页面仍能收到）换简单性。大陆服务器直连 FCM 不通时通知即丢，直到设备下次打开应用自动重订阅；iPhone/APNs 不受影响。
 - **`approvalGraceMs` 默认 5s**：模型答复器（dsh-auto-approve 类）实测平均 2.4s；窗口太短会推「等你授权」但框从未出现（zen-remote 踩过）。
-- **同源校验只盖 POST（test/subscribe/unsubscribe）**：poll 与静态文件是只读的，GET 不需要 CSRF 防护；推送发送在 host 内部发起，不经过浏览器。
+- **同源校验只盖 POST（test/subscribe/unsubscribe）**：静态文件是只读的，GET 不需要 CSRF 防护；推送发送在 host 内部发起，不经过浏览器。
 - **登录门兼容**：本部署装有 dsh-login-gate 时，全部路由经它过鉴权，已登录页面无感；推送唤醒走推送服务商→系统→SW，完全不经过 DSH，登录门不影响锁屏送达。
 
 ## 6. 发布

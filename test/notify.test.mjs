@@ -14,9 +14,7 @@ import {
   assistantText,
   turnSummary,
   pendingQuestionText,
-  createNotifyStore,
   sameOriginPost,
-  handlePoll,
   handleTest,
   handleRoute,
   BASE,
@@ -102,43 +100,6 @@ test('pendingQuestionText parses best-effort', () => {
   assert.equal(pendingQuestionText('{"questions":[]}'), '')
 })
 
-// --- notification store -----------------------------------------------------
-
-test('store: sequence monotonic, since filter, TTL expiry, cap overflow', async () => {
-  const store = createNotifyStore({ ttlMs: 50, cap: 3 })
-  const s1 = store.push('approval', 'a', '', 't1')
-  store.push('approval', 'b', '', 't2')
-  const s3 = store.push('approval', 'c', '', 't3')
-  assert.equal(s3, s1 + 2)
-
-  let poll = store.poll(0)
-  assert.equal(poll.items.length, 3)
-  assert.equal(poll.seq, s3)
-
-  poll = store.poll(s1)
-  assert.equal(poll.items.length, 2)
-
-  // TTL: after expiry nothing older than the window is delivered
-  await sleep(60)
-  poll = store.poll(0, Date.now())
-  assert.equal(poll.items.length, 0)
-
-  // cap: overflow drops oldest
-  const big = createNotifyStore({ ttlMs: 60000, cap: 3 })
-  for (let i = 0; i < 5; i++) big.push('test', String(i), '', 't')
-  assert.equal(big.poll(0).items.length, 3)
-  assert.equal(big.poll(0).items[0].title, '2')
-})
-
-test('store: activeClients tracks recent pollers only', () => {
-  const store = createNotifyStore()
-  assert.equal(store.activeClients(), 0)
-  store.seenClient('a')
-  store.seenClient('b')
-  assert.equal(store.activeClients(), 2)
-  assert.equal(store.activeClients(Date.now() + 60000), 0)
-})
-
 // --- HTTP helpers -----------------------------------------------------------
 
 test('sameOriginPost port: origin/host match, mismatch, and sec-fetch fallback', () => {
@@ -190,70 +151,53 @@ function mockReq({ method = 'GET', url = '/', headers = {}, body = null }) {
   return req
 }
 
-test('handlePoll: baseline reports seq, cid tracked, method enforced', async () => {
-  const store = createNotifyStore()
-  store.push('test', 'one', '', 't')
+test('handleTest: same-origin enforced, bad JSON rejected, pushes via broadcast', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-pwa-notify-'))
+  try {
+    const push = createPushState({ stateFile: join(dir, 'state.json') })
 
-  const res = mockRes()
-  await handlePoll(store, mockReq({ url: `${BASE}/poll?since=0&cid=abc` }), res)
-  assert.equal(res.state.status, 200)
-  assert.equal(res.state.headers['cache-control'], 'no-store')
-  const data = JSON.parse(res.state.body)
-  assert.equal(data.ok, true)
-  assert.equal(data.items.length, 1)
-  assert.equal(store.activeClients(), 1)
+    const res403 = mockRes()
+    await handleTest(push, mockReq({ method: 'POST', url: `${BASE}/test`, headers: { origin: 'http://evil', host: 'ok' }, body: '{}' }), res403)
+    assert.equal(res403.state.status, 403)
 
-  const res405 = mockRes()
-  await handlePoll(store, mockReq({ method: 'POST', url: `${BASE}/poll` }), res405)
-  assert.equal(res405.state.status, 405)
-})
+    // No subscriptions: broadcast is a clean no-op reporting sent: 0.
+    const resOk = mockRes()
+    await handleTest(
+      push,
+      mockReq({
+        method: 'POST',
+        url: `${BASE}/test`,
+        headers: { origin: 'http://ok:1', host: 'ok:1' },
+        body: JSON.stringify({ title: '嗨', body: '测试' }),
+      }),
+      resOk,
+    )
+    assert.equal(resOk.state.status, 200)
+    assert.equal(JSON.parse(resOk.state.body).sent, 0)
 
-test('handleTest: same-origin enforced, body capped, enqueues test item', async () => {
-  const store = createNotifyStore()
-
-  const res403 = mockRes()
-  await handleTest(store, mockReq({ method: 'POST', url: `${BASE}/test`, headers: { origin: 'http://evil', host: 'ok' }, body: '{}' }), res403)
-  assert.equal(res403.state.status, 403)
-
-  const resOk = mockRes()
-  await handleTest(
-    store,
-    mockReq({
-      method: 'POST',
-      url: `${BASE}/test`,
-      headers: { origin: 'http://ok:1', host: 'ok:1' },
-      body: JSON.stringify({ title: '嗨', body: '测试' }),
-    }),
-    resOk,
-  )
-  assert.equal(resOk.state.status, 200)
-  const polled = store.poll(0)
-  assert.equal(polled.items.length, 1)
-  assert.equal(polled.items[0].kind, 'test')
-  assert.equal(polled.items[0].title, '嗨')
-
-  const resBad = mockRes()
-  await handleTest(
-    store,
-    mockReq({ method: 'POST', url: `${BASE}/test`, headers: { origin: 'http://ok:1', host: 'ok:1' }, body: 'not json' }),
-    resBad,
-  )
-  assert.equal(resBad.state.status, 400)
+    const resBad = mockRes()
+    await handleTest(
+      push,
+      mockReq({ method: 'POST', url: `${BASE}/test`, headers: { origin: 'http://ok:1', host: 'ok:1' }, body: 'not json' }),
+      resBad,
+    )
+    assert.equal(resBad.state.status, 400)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 test('handleRoute: 404 unknown, sw.js carries Service-Worker-Allowed, manifest served', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-pwa-notify-'))
   try {
-    const store = createNotifyStore()
     const push = createPushState({ stateFile: join(dir, 'state.json') })
-    const emit = (kind, title, body, tag) => store.push(kind, title, body, tag)
 
     const res404 = mockRes()
-    await handleRoute(store, push, emit, mockReq({ url: `${BASE}/nope.png` }), res404)
+    await handleRoute(push, mockReq({ url: `${BASE}/nope.png` }), res404)
     assert.equal(res404.state.status, 404)
 
     const resSw = mockRes()
-    await handleRoute(store, push, emit, mockReq({ url: `${BASE}/sw.js` }), resSw)
+    await handleRoute(push, mockReq({ url: `${BASE}/sw.js` }), resSw)
     assert.equal(resSw.state.status, 200)
     assert.equal(resSw.state.headers['service-worker-allowed'], '/')
     assert.equal(resSw.state.headers['content-type'], 'text/javascript; charset=utf-8')
@@ -262,7 +206,7 @@ test('handleRoute: 404 unknown, sw.js carries Service-Worker-Allowed, manifest s
     assert.ok(resSw.state.body.includes('push'))
 
     const resManifest = mockRes()
-    await handleRoute(store, push, emit, mockReq({ url: `${BASE}/manifest.json` }), resManifest)
+    await handleRoute(push, mockReq({ url: `${BASE}/manifest.json` }), resManifest)
     assert.equal(resManifest.state.status, 200)
     assert.equal(resManifest.state.headers['content-type'], 'application/manifest+json; charset=utf-8')
     const manifest = JSON.parse(resManifest.state.body)
@@ -270,7 +214,7 @@ test('handleRoute: 404 unknown, sw.js carries Service-Worker-Allowed, manifest s
     assert.ok(manifest.icons.length >= 2)
 
     const resIcon = mockRes()
-    await handleRoute(store, push, emit, mockReq({ url: `${BASE}/icon-192.png` }), resIcon)
+    await handleRoute(push, mockReq({ url: `${BASE}/icon-192.png` }), resIcon)
     assert.equal(resIcon.state.status, 200)
     assert.equal(resIcon.state.headers['content-type'], 'image/png')
     assert.equal(resIcon.state.body.subarray(1, 4).toString('ascii'), 'PNG')
