@@ -26,6 +26,9 @@ window.__ModuleLoader__.load({
     const exports = module.exports
     Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' })
 
+    const react = require('react')
+    const h = react.createElement
+
     const BASE = '/_dsh/pwa-notify'
     const SNOOZE_KEY = 'dsh-pwa-notify-snooze'
     const DISABLE_KEY = 'dsh-pwa-notify'
@@ -331,6 +334,7 @@ window.__ModuleLoader__.load({
     }
 
     function apply(ctx) {
+      applySettings(ctx)
       if (disabledByUrl() || disabledByStorage()) {
         window.__DSH_PWA_NOTIFY__.disabled = true
         return
@@ -374,8 +378,239 @@ window.__ModuleLoader__.load({
       }, 'dsh-pwa-notify: client')
     }
 
+    // ---- Settings → 通知推送 (settings.section slot) -------------------------
+    //
+    // Backed by the host's `dsh-pwa-notify` settings namespace (scope.get/set
+    // persist through dsh-settings-file) plus this plugin's own routes for
+    // test sends and the subscription count. Styling/classes follow
+    // dsh-login-gate's proven settings-card shape.
+
+    var SETTINGS_CSS = `.pwn-section{max-width:560px;display:flex;flex-direction:column;gap:2px}
+.pwn-section-title{margin:0 0 2px;font-size:18px;font-weight:600;color:var(--dsw-alias-label-primary,#e6e8ec);line-height:1.4}
+.pwn-section-desc{margin:0 0 10px;color:var(--dsw-alias-label-tertiary,#9aa3af);font-size:13px;line-height:1.5}
+.pwn-field{display:flex;flex-direction:column;gap:7px;padding:12px 0}
+.pwn-field+.pwn-field{border-top:1px solid var(--dsw-alias-border-l2,#2c313a)}
+.pwn-label{color:var(--dsw-alias-label-primary,#c2c8d0);font-size:13px;font-weight:500;line-height:1.5}
+.pwn-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.pwn-input{border:1px solid var(--dsw-alias-border-l2,#333945);background:var(--dsw-alias-bg-layer-3,#16181d);height:34px;font:inherit;color:var(--dsw-alias-label-primary,#e6e8ec);border-radius:8px;padding:0 12px;font-size:13px;line-height:1.5;box-sizing:border-box;flex:1;min-width:0}
+.pwn-input:focus-visible{border-color:var(--dsw-alias-brand-primary,#4f8ef7);outline:none}
+.pwn-input::placeholder{color:var(--dsw-alias-label-tertiary,#6b7280)}
+.pwn-btn{appearance:none;font:inherit;cursor:pointer;border:1px solid #0000;border-radius:8px;padding:6px 14px;font-size:13px;line-height:1.5;background:#3567f6;color:#fff;align-self:flex-start}
+.pwn-btn:hover{background:#2c58dd}
+[data-ds-dark-theme] .pwn-btn{background:#000;color:#fff}
+[data-ds-dark-theme] .pwn-btn:hover{background:#1f2127}
+.pwn-btn-ghost{appearance:none;font:inherit;cursor:pointer;border:1px solid var(--dsw-alias-border-l2,#333945);border-radius:8px;padding:6px 14px;font-size:13px;line-height:1.5;background:transparent;color:var(--dsw-alias-label-secondary,#c2c8d0)}
+.pwn-btn-ghost:hover{border-color:var(--dsw-alias-brand-primary,#4f8ef7);color:var(--dsw-alias-label-primary,#e6e8ec)}
+.pwn-check{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--dsw-alias-label-primary,#c2c8d0);line-height:1.5;cursor:pointer}
+.pwn-check input{width:16px;height:16px;accent-color:var(--dsw-alias-brand-primary,#4f8ef7);cursor:pointer}
+.pwn-hint{color:var(--dsw-alias-label-tertiary,#6b7280);margin:0;font-size:12px;line-height:1.5}
+.pwn-msg{margin:4px 0 0;font-size:12px;line-height:1.5}
+.pwn-msg-ok{color:#7bd88f}
+.pwn-msg-err{color:#ff9aa4}
+.pwn-code{font-family:ui-monospace,monospace;font-size:12px;background:var(--dsw-alias-bg-layer-3,#16181d);border:1px solid var(--dsw-alias-border-l2,#2c313a);border-radius:4px;padding:0 4px}`
+
+    function ensureSettingsStyle() {
+      if (document.querySelector('style[data-plugin="dsh-pwa-notify-settings"]') === null) {
+        var tag = document.createElement('style')
+        tag.setAttribute('data-plugin', 'dsh-pwa-notify-settings')
+        tag.textContent = SETTINGS_CSS
+        document.head.appendChild(tag)
+      }
+    }
+
+    var TEXT_FIELDS = [
+      { key: 'textApprovalTitle', label: '授权 · 标题', ph: 'DSH 等你授权' },
+      { key: 'textApprovalBody', label: '授权 · 内容', ph: '{tool} 需要授权才能继续' },
+      { key: 'textQuestionTitle', label: '提问 · 标题', ph: 'DSH 等你回答' },
+      { key: 'textQuestionBody', label: '提问 · 内容', ph: '{question}（关掉摘要时固定为提示语）' },
+      { key: 'textTurnTitle', label: '完成 · 标题', ph: 'DSH 任务完成' },
+      { key: 'textTurnBody', label: '完成 · 内容', ph: '{summary}（关掉摘要时固定为提示语）' },
+    ]
+
+    var KIND_TESTS = [
+      { kind: 'approval', label: '测试·授权' },
+      { kind: 'question', label: '测试·提问' },
+      { kind: 'turn-end', label: '测试·完成' },
+    ]
+
+    function postTest(kind) {
+      return fetch(BASE + '/test', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ kind: kind }),
+      })
+        .then(function (res) {
+          return res.json().catch(function () {
+            return { ok: false }
+          })
+        })
+        .catch(function () {
+          return { ok: false }
+        })
+    }
+
+    function NotifySection(props) {
+      var scope = props.scope
+      var snapState = react.useState(function () { return scope.getSnapshot() })
+      var snap = snapState[0]
+      var setSnap = snapState[1]
+      react.useEffect(function () {
+        return scope.subscribe(function () { setSnap(scope.getSnapshot()) })
+      }, [scope])
+
+      var msgState = react.useState(null)
+      var msg = msgState[0]
+      var setMsg = msgState[1]
+
+      var subState = react.useState(null)
+      var subs = subState[0]
+      var setSubs = subState[1]
+      var refreshSubs = function () {
+        fetch(BASE + '/vapid', { credentials: 'same-origin' })
+          .then(function (r) { return r.json() })
+          .then(function (d) { if (d && d.ok) setSubs(d.subscriptions) })
+          .catch(function () {})
+      }
+      react.useEffect(refreshSubs, [])
+
+      var ready = snap.status === 'ready'
+      var v = ready && snap.value ? snap.value : null
+
+      // text inputs keep local draft state; 保存 writes all six keys at once
+      var draftState = react.useState({})
+      var draft = draftState[0]
+      var setDraft = draftState[1]
+      var draftFor = function (key) {
+        return key in draft ? draft[key] : v ? String(v[key] || '') : ''
+      }
+      var setDraftKey = function (key, value) {
+        var next = Object.assign({}, draft)
+        next[key] = value
+        setDraft(next)
+      }
+
+      function saveToggle(key, checked) {
+        setMsg(null)
+        scope.set(key, checked).then(
+          function () { setMsg({ kind: 'ok', text: '已保存，即时生效。' }) },
+          function () { setMsg({ kind: 'err', text: '保存失败，请重试。' }) },
+        )
+      }
+
+      function saveTexts() {
+        setMsg(null)
+        var chain = Promise.resolve()
+        var _loop = function (f) {
+          if (f.key in draft) {
+            chain = chain.then(function () { return scope.set(f.key, draft[f.key].trim()) })
+          }
+        }
+        for (var i = 0; i < TEXT_FIELDS.length; i++) _loop(TEXT_FIELDS[i])
+        chain.then(
+          function () {
+            setDraft({})
+            setMsg({ kind: 'ok', text: '文案已保存，即时生效。' })
+          },
+          function () { setMsg({ kind: 'err', text: '保存失败，请重试。' }) },
+        )
+      }
+
+      function sendKindTest(kind) {
+        setMsg(null)
+        postTest(kind).then(function (r) {
+          if (r.ok && r.sent > 0) setMsg({ kind: 'ok', text: '已推送到 ' + r.sent + ' 台设备：' + r.title })
+          else if (r.ok) setMsg({ kind: 'err', text: '发送成功，但当前没有已订阅设备（先在页面/主屏 PWA 里开启通知）。' })
+          else setMsg({ kind: 'err', text: '发送失败，请重试。' })
+        })
+      }
+
+      return h('div', { className: 'pwn-section' },
+        h('h2', { className: 'pwn-section-title' }, '通知推送'),
+        h('p', { className: 'pwn-section-desc' }, 'PWA 锁屏推送的开关、文案与测试'),
+        !ready ? h('p', { className: 'pwn-hint' }, '正在读取设置…') : null,
+        ready ? h('div', { className: 'pwn-field' },
+          h('label', { className: 'pwn-label' }, '推送开关'),
+          h('label', { className: 'pwn-check' },
+            h('input', { type: 'checkbox', checked: v && v.approvalPush !== false, onChange: function (e) { saveToggle('approvalPush', e.target.checked) } }),
+            '工具等授权时推送'
+          ),
+          h('label', { className: 'pwn-check' },
+            h('input', { type: 'checkbox', checked: v && v.questionPush !== false, onChange: function (e) { saveToggle('questionPush', e.target.checked) } }),
+            '智能体提问时推送'
+          ),
+          h('label', { className: 'pwn-check' },
+            h('input', { type: 'checkbox', checked: v && v.turnEndPush === true, onChange: function (e) { saveToggle('turnEndPush', e.target.checked) } }),
+            '回合完成时推送'
+          ),
+          h('label', { className: 'pwn-check' },
+            h('input', { type: 'checkbox', checked: v && v.includeSummary === true, onChange: function (e) { saveToggle('includeSummary', e.target.checked) } }),
+            '通知带对话摘要（填入 {question} / {summary}）'
+          ),
+          h('p', { className: 'pwn-hint' }, '子代理的回合完成永远不推。')
+        ) : null,
+        ready ? h('div', { className: 'pwn-field' },
+          h('label', { className: 'pwn-label' }, '推送文案'),
+          TEXT_FIELDS.map(function (f) {
+            return h('input', {
+              key: f.key,
+              className: 'pwn-input',
+              type: 'text',
+              placeholder: f.ph,
+              value: draftFor(f.key),
+              onChange: function (e) { setDraftKey(f.key, e.target.value) },
+            })
+          }),
+          h('div', { className: 'pwn-row' },
+            h('button', { type: 'button', className: 'pwn-btn', onClick: saveTexts }, '保存文案')
+          ),
+          h('p', { className: 'pwn-hint' },
+            '留空用默认。可用变量：', h('span', { className: 'pwn-code' }, '{tool}'), ' 工具名、',
+            h('span', { className: 'pwn-code' }, '{question}'), ' 提问原文、',
+            h('span', { className: 'pwn-code' }, '{summary}'), ' 本回合摘要；后两个只在开启「带摘要」时有内容。'
+          )
+        ) : null,
+        ready ? h('div', { className: 'pwn-field' },
+          h('label', { className: 'pwn-label' }, '测试发送'),
+          h('div', { className: 'pwn-row' },
+            KIND_TESTS.map(function (t) {
+              return h('button', { key: t.kind, type: 'button', className: 'pwn-btn-ghost', onClick: function () { sendKindTest(t.kind) } }, t.label)
+            })
+          ),
+          h('p', { className: 'pwn-hint' }, '按当前文案模板 + 示例变量推一条真通知到已订阅设备，用于预览自定义效果。')
+        ) : null,
+        ready ? h('div', { className: 'pwn-field' },
+          h('label', { className: 'pwn-label' }, '订阅状态'),
+          h('p', { className: 'pwn-hint' },
+            subs === null ? '读取中…' : '已订阅设备：' + subs + ' 台（页面或主屏 PWA 里开启过通知的设备）。'
+          ),
+          h('div', { className: 'pwn-row' },
+            h('button', { type: 'button', className: 'pwn-btn-ghost', onClick: refreshSubs }, '刷新')
+          )
+        ) : null,
+        msg ? h('p', { className: 'pwn-msg ' + (msg.kind === 'ok' ? 'pwn-msg-ok' : 'pwn-msg-err') }, msg.text) : null,
+      )
+    }
+
+    function applySettings(ctx) {
+      ensureSettingsStyle()
+      var scope = ctx.settingsScope.bind({ namespace: 'dsh-pwa-notify' })
+      ctx.slots.inject('settings.section', function () {
+        return ctx.slots.register(
+          {
+            name: 'settings.section',
+            id: 'dsh-pwa-notify',
+            order: 40,
+            label: function () { return '通知推送' },
+            inject: function () { return { scope: scope } },
+          },
+          NotifySection,
+        )
+      })
+    }
+
     exports.apply = apply
-    exports.inject = []
+    exports.inject = ['slots', 'settingsScope']
     return module.exports
   },
 })

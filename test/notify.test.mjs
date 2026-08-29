@@ -11,6 +11,10 @@ import { join } from 'node:path'
 import { createPushState } from '../src/webpush.js'
 import {
   decideNotification,
+  renderTemplate,
+  renderTexts,
+  DEFAULT_TEXTS,
+  TEST_SAMPLES,
   assistantText,
   turnSummary,
   pendingQuestionText,
@@ -110,6 +114,50 @@ test('sameOriginPost port: origin/host match, mismatch, and sec-fetch fallback',
   assert.equal(sameOriginPost({ headers: {} }), false)
 })
 
+// --- texts + toggles ----------------------------------------------------------
+
+test('renderTemplate replaces tokens; unknown/empty vars render empty', () => {
+  assert.equal(renderTemplate('{tool} 需要授权', { tool: 'bash' }), 'bash 需要授权')
+  assert.equal(renderTemplate('{question}', { question: '' }), '')
+  assert.equal(renderTemplate('a {nope} b', {}), 'a  b')
+})
+
+test('renderTexts: defaults, user overrides, summary gating, clipping', () => {
+  // default approval body with tool
+  let t = renderTexts('approval', { toolName: 'bash' }, {})
+  assert.equal(t.title, DEFAULT_TEXTS.approvalTitle)
+  assert.equal(t.body, 'bash 需要授权才能继续')
+  // no tool -> fixed fallback
+  t = renderTexts('approval', {}, {})
+  assert.equal(t.body, '有操作需要授权才能继续')
+  // custom template wins
+  t = renderTexts('approval', { toolName: 'bash' }, { texts: { approvalTitle: '审批 {tool}', approvalBody: '请处理 {tool}' } })
+  assert.equal(t.title, '审批 bash')
+  assert.equal(t.body, '请处理 bash')
+  // question: summary off -> fixed hint even with input
+  t = renderTexts('question', { question: '哪个？' }, {})
+  assert.equal(t.body, '智能体提了一个问题，正在等你回答')
+  // summary on -> template renders the question
+  t = renderTexts('question', { question: '哪个？' }, { includeSummary: true })
+  assert.equal(t.body, '哪个？')
+  // turn-end: summary on, custom template, clip long
+  t = renderTexts('turn-end', { summary: 'x'.repeat(300) }, { includeSummary: true, texts: { turnBody: '{summary}!' } })
+  assert.equal(t.body.length, 200)
+  assert.ok(t.body.endsWith('!') === false || t.body.length <= 200)
+})
+
+test('decideNotification honors toggles and custom texts', () => {
+  assert.equal(decideNotification({ kind: 'approval', now: 1, lastSent: 0 }, { ...CFG, approvalEnabled: false }).reason, 'approval-disabled')
+  assert.equal(decideNotification({ kind: 'question', now: 1, lastSent: 0 }, { ...CFG, questionEnabled: false }).reason, 'question-disabled')
+  const d = decideNotification(
+    { kind: 'approval', now: 1, lastSent: 0, toolName: 'bash' },
+    { ...CFG, texts: { approvalTitle: '要授权啦' } },
+  )
+  assert.equal(d.title, '要授权啦')
+  // legacy CFG without the new keys keeps old behavior (backwards compat)
+  assert.equal(decideNotification({ kind: 'approval', now: 1, lastSent: 0, toolName: 'bash' }, CFG).body, 'bash 需要授权才能继续')
+})
+
 // --- route handlers ---------------------------------------------------------
 
 function mockRes() {
@@ -157,13 +205,14 @@ test('handleTest: same-origin enforced, bad JSON rejected, pushes via broadcast'
     const push = createPushState({ stateFile: join(dir, 'state.json') })
 
     const res403 = mockRes()
-    await handleTest(push, mockReq({ method: 'POST', url: `${BASE}/test`, headers: { origin: 'http://evil', host: 'ok' }, body: '{}' }), res403)
+    await handleTest(push, null, mockReq({ method: 'POST', url: `${BASE}/test`, headers: { origin: 'http://evil', host: 'ok' }, body: '{}' }), res403)
     assert.equal(res403.state.status, 403)
 
     // No subscriptions: broadcast is a clean no-op reporting sent: 0.
     const resOk = mockRes()
     await handleTest(
       push,
+      null,
       mockReq({
         method: 'POST',
         url: `${BASE}/test`,
@@ -178,6 +227,7 @@ test('handleTest: same-origin enforced, bad JSON rejected, pushes via broadcast'
     const resBad = mockRes()
     await handleTest(
       push,
+      null,
       mockReq({ method: 'POST', url: `${BASE}/test`, headers: { origin: 'http://ok:1', host: 'ok:1' }, body: 'not json' }),
       resBad,
     )
@@ -193,11 +243,11 @@ test('handleRoute: 404 unknown, sw.js carries Service-Worker-Allowed, manifest s
     const push = createPushState({ stateFile: join(dir, 'state.json') })
 
     const res404 = mockRes()
-    await handleRoute(push, mockReq({ url: `${BASE}/nope.png` }), res404)
+    await handleRoute(push, null, mockReq({ url: `${BASE}/nope.png` }), res404)
     assert.equal(res404.state.status, 404)
 
     const resSw = mockRes()
-    await handleRoute(push, mockReq({ url: `${BASE}/sw.js` }), resSw)
+    await handleRoute(push, null, mockReq({ url: `${BASE}/sw.js` }), resSw)
     assert.equal(resSw.state.status, 200)
     assert.equal(resSw.state.headers['service-worker-allowed'], '/')
     assert.equal(resSw.state.headers['content-type'], 'text/javascript; charset=utf-8')
@@ -206,7 +256,7 @@ test('handleRoute: 404 unknown, sw.js carries Service-Worker-Allowed, manifest s
     assert.ok(resSw.state.body.includes('push'))
 
     const resManifest = mockRes()
-    await handleRoute(push, mockReq({ url: `${BASE}/manifest.json` }), resManifest)
+    await handleRoute(push, null, mockReq({ url: `${BASE}/manifest.json` }), resManifest)
     assert.equal(resManifest.state.status, 200)
     assert.equal(resManifest.state.headers['content-type'], 'application/manifest+json; charset=utf-8')
     const manifest = JSON.parse(resManifest.state.body)
@@ -214,7 +264,7 @@ test('handleRoute: 404 unknown, sw.js carries Service-Worker-Allowed, manifest s
     assert.ok(manifest.icons.length >= 2)
 
     const resIcon = mockRes()
-    await handleRoute(push, mockReq({ url: `${BASE}/icon-192.png` }), resIcon)
+    await handleRoute(push, null, mockReq({ url: `${BASE}/icon-192.png` }), resIcon)
     assert.equal(resIcon.state.status, 200)
     assert.equal(resIcon.state.headers['content-type'], 'image/png')
     assert.equal(resIcon.state.body.subarray(1, 4).toString('ascii'), 'PNG')

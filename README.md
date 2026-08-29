@@ -12,6 +12,7 @@
 - **PWA 化**：DSH host 直接托管 `manifest.json` + service worker + 图标（`/_dsh/pwa-notify/*`），通过官方的 `webserver/index-inject` 事件把 `<link rel="manifest">` 注入页面。手机浏览器菜单里「添加到主屏幕」即可装成 App。
 - **真·Web Push**：HTTPS 访问时，页面/主屏 PWA 用 VAPID 公钥订阅推送；智能体需要你时 DSH host 直接向推送服务（FCM/APNs/Mozilla 的系统级通道）发出 aes128gcm 端到端加密通知——**即使 App 已被 iOS 杀掉也能到锁屏**。
 - **推送是唯一通知通道**（轮询兜底已按需移除）：简单、零常驻请求；代价是一条推送发送失败即丢失（无兜底重放）——设备下次打开应用时会自动重新订阅，自愈。`notify_user` 工具的 `delivered` 返回真实送达数（推送服务 2xx 计数）。
+- **设置界面**：DSH 设置页新增「通知推送」卡片——三类推送开关（等授权 / 等回答 / 回合完成）、对话摘要开关、六条文案模板自定义（`{tool}` / `{question}` / `{summary}` 变量）、按当前模板发真通知的测试按钮、订阅设备数。改完即时生效，持久化在 DSH 的设置存储里，不用重启。
 - **`notify_user` 模型工具**：模型可以在关键节点主动唤起一条通知（严格限流：每会话 60 秒 1 条、全局每小时 20 条），并附带系统提示词引导，防止它每回合都喊。
 
 ## 通知什么时候会响
@@ -73,19 +74,21 @@ pnpm add dsh-pwa-notify        # 或 link:/path/to/dsh-pwa-notify 本地开发
 
 ## 可选配置
 
-在插件行（profile 的 `cordis.patch.yml`）里写：
+**日常开关与文案**在 DSH 设置页的「通知推送」卡片里改（即时生效，无需重启）。
+
+**静态项**在插件行（profile 的 `cordis.patch.yml`）里写：
 
 ```yaml
 - id: dsh-pwa-notify
   config:
     vapidSubject: https://dsh.example.com  # iOS 必须：真实的 mailto: 或 https: 联系方式，占位符会被 Apple 拒发
-    turnEnd: true          # 回合结束也通知（默认 false）
     approvalGraceMs: 5000  # 授权等待宽限：装了自动审批插件时，等它答完再决定推不推
-    debounceMs: 15000      # 两条自动「回合结束」通知的最小间隔（等授权/等回答不受限）
-    includeSummary: false  # true 时通知带上本回合最终回复（截 120 字）和提问原文
+    debounceMs: 15000      # 两条自动「回合完成」通知的最小间隔（等授权/等回答不受限）
     notifyTool: true       # false 关掉 notify_user 模型工具
-    push: true             # false 关掉 Web Push，只留轮询通道
+    push: true             # false 关掉推送（设置卡片的开关也全部失效）
 ```
+
+`turnEnd` / `includeSummary` 仍可作为**初始值**写在行里；设置卡片保存过之后以设置存储为准。
 
 改完重启 `dsh web`。VAPID 密钥对与订阅列表持久化在 `$DSH_HOME/pwa-notify-state.json`（删掉它 = 作废所有已订阅设备，会自动重新生成密钥）。
 

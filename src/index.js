@@ -46,6 +46,7 @@ import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import z from '@deepseek-ai/schemastery'
 import { createPushState } from './webpush.js'
 
 /** All host routes live under this prefix (one `prefix` webServer route). */
@@ -89,6 +90,31 @@ export const PUSH_POLICY = {
   model: { ttl: 900, urgency: 'high' },
   test: { ttl: 60, urgency: 'normal' },
 }
+
+/**
+ * User-facing settings namespace (`dsh-pwa-notify`), registered with the
+ * settings service when one is mounted (the Web composition ships
+ * dsh-settings-file): the Settings → 通知推送 card edits these live —
+ * no restart. Flat keys on purpose (schemastery + settings UI both stay
+ * simple); empty text = shipped default. `turnEndPush`/`includeSummary` are
+ * seeded from the plugin-row config as their composition base layer.
+ */
+export const SettingsSchema = z.object({
+  /** Notify when a tool approval is waiting on a human. */
+  approvalPush: z.boolean().default(true),
+  /** Notify when an ask_user_question is pending. */
+  questionPush: z.boolean().default(true),
+  /** Notify on ordinary turn end. */
+  turnEndPush: z.boolean().default(false),
+  /** Fill {question}/{summary} template variables with conversation text. */
+  includeSummary: z.boolean().default(false),
+  textApprovalTitle: z.string().default(''),
+  textApprovalBody: z.string().default(''),
+  textQuestionTitle: z.string().default(''),
+  textQuestionBody: z.string().default(''),
+  textTurnTitle: z.string().default(''),
+  textTurnBody: z.string().default(''),
+})
 
 /** Body cap for the POST /test payload. */
 const TEST_BODY_MAX = 4096
@@ -155,6 +181,67 @@ export function pendingQuestionText(rawArguments) {
 
 const skip = (reason) => ({ shouldNotify: false, title: '', body: '', reason })
 
+// --- notification texts: defaults + user-override templates ------------------
+//
+// Users override these through the Settings → 通知推送 card; an override is a
+// template with `{tool}` / `{question}` / `{summary}` tokens. An empty
+// override falls back to the shipped default. The `question`/`summary`
+// variables are only filled when includeSummary is on — the
+// no-conversation-content default must survive customization (a template
+// without those tokens never leaks content either).
+
+export const DEFAULT_TEXTS = {
+  approvalTitle: 'DSH 等你授权',
+  approvalBody: '{tool} 需要授权才能继续',
+  questionTitle: 'DSH 等你回答',
+  questionBody: '{question}',
+  turnTitle: 'DSH 任务完成',
+  turnBody: '{summary}',
+}
+
+/** Replace `{token}` references; unknown/empty variables render empty. */
+export function renderTemplate(template, vars) {
+  return String(template ?? '').replace(/\{(\w+)\}/g, (_, key) => String(vars[key] ?? ''))
+}
+
+const TITLE_MAX = 80
+const BODY_MAX = 200
+
+/**
+ * Titles/bodies for one decided notification, honoring user templates. Pure:
+ * everything arrives as arguments — the /test preview and decideNotification
+ * share it, and tests drive it directly.
+ *
+ * @param {string} kind 'approval' | 'question' | 'turn-end'
+ * @param {object} input `{ toolName?, question?, summary? }`
+ * @param {object} cfg `{ texts?, includeSummary }`
+ */
+export function renderTexts(kind, input, cfg) {
+  const t = (cfg && cfg.texts) || {}
+  const pick = (key) => {
+    const custom = t[key]
+    return typeof custom === 'string' && custom.trim() !== '' ? custom : DEFAULT_TEXTS[key]
+  }
+  const vars = {
+    tool: input.toolName || '',
+    question: cfg && cfg.includeSummary ? input.question || '' : '',
+    summary: cfg && cfg.includeSummary ? input.summary || '' : '',
+  }
+  let title
+  let body
+  if (kind === 'approval') {
+    title = renderTemplate(pick('approvalTitle'), vars)
+    body = renderTemplate(input.toolName ? pick('approvalBody') : '有操作需要授权才能继续', vars)
+  } else if (kind === 'question') {
+    title = renderTemplate(pick('questionTitle'), vars)
+    body = vars.question !== '' ? renderTemplate(pick('questionBody'), vars) : '智能体提了一个问题，正在等你回答'
+  } else {
+    title = renderTemplate(pick('turnTitle'), vars)
+    body = vars.summary !== '' ? renderTemplate(pick('turnBody'), vars) : '智能体已完成当前回合'
+  }
+  return { title: title.slice(0, TITLE_MAX), body: body.slice(0, BODY_MAX) }
+}
+
 /**
  * The whole notification policy, as one pure function.
  *
@@ -166,7 +253,8 @@ const skip = (reason) => ({ shouldNotify: false, title: '', body: '', reason })
  *   summary         already-extracted turn summary  ('turn-end')
  *   toolName        tool awaiting approval          ('approval')
  *   question        pending question text           ('question')
- * @param {object} cfg { turnEndEnabled, debounceMs, includeSummary }
+ * @param {object} cfg { turnEndEnabled, debounceMs, includeSummary,
+ *                       approvalEnabled?, questionEnabled?, texts? }
  * @returns {{shouldNotify: boolean, title: string, body: string, reason: string}}
  */
 export function decideNotification(input, cfg) {
@@ -174,28 +262,27 @@ export function decideNotification(input, cfg) {
 
   switch (input.kind) {
     // Event leg. Exempt from the debounce on purpose: "a tool is waiting for
-    // your OK" is the one notification that must never be swallowed.
-    case 'approval':
-      return {
-        shouldNotify: true,
-        title: 'DSH 等你授权',
-        body: input.toolName ? `${input.toolName} 需要授权才能继续` : '有操作需要授权才能继续',
-        reason: 'approval-pending',
-      }
-    case 'question':
-      return {
-        shouldNotify: true,
-        title: 'DSH 等你回答',
-        body: (cfg.includeSummary && input.question) || '智能体提了一个问题，正在等你回答',
-        reason: 'question-pending',
-      }
+    // your OK" is the one notification that must never be swallowed. Both
+    // toggles default ON and are user-switchable in the settings card.
+    case 'approval': {
+      if (cfg.approvalEnabled === false) return skip('approval-disabled')
+      const texts = renderTexts('approval', input, cfg)
+      return { shouldNotify: true, title: texts.title, body: texts.body, reason: 'approval-pending' }
+    }
+    case 'question': {
+      if (cfg.questionEnabled === false) return skip('question-disabled')
+      const texts = renderTexts('question', input, cfg)
+      return { shouldNotify: true, title: texts.title, body: texts.body, reason: 'question-pending' }
+    }
 
     // Turn end. Opt-in, top-level only, debounced.
-    case 'turn-end':
+    case 'turn-end': {
       if (!cfg.turnEndEnabled) return skip('turn-end-disabled')
       if ((input.delegationDepth ?? 0) !== 0) return skip('subagent')
       if (debounced) return skip('debounced')
-      return { shouldNotify: true, title: 'DSH 任务完成', body: input.summary || '智能体已完成当前回合', reason: 'turn-end' }
+      const texts = renderTexts('turn-end', input, cfg)
+      return { shouldNotify: true, title: texts.title, body: texts.body, reason: 'turn-end' }
+    }
 
     default:
       return skip('unknown-kind')
@@ -262,10 +349,21 @@ export function readBody(req, maxBytes = TEST_BODY_MAX) {
   })
 }
 
-/** POST {BASE}/test {title?, body?} — the "send a test notification" button.
- * Broadcasts straight through Web Push; the response reports how many
- * subscriptions actually accepted it. */
-export async function handleTest(pushState, req, res) {
+/** Sample variables for the /test kind preview — what the settings card's
+ * per-kind test buttons render the live templates with. */
+export const TEST_SAMPLES = {
+  approval: { toolName: 'bash（示例）' },
+  question: { question: '示例问题：这两个方案你倾向哪个？' },
+  'turn-end': { summary: '示例摘要：已修复通知卡片样式并提交（fix: notify-card）' },
+}
+
+/** POST {BASE}/test {kind?, title?, body?} — the test buttons.
+ * With `kind`, renders that kind's LIVE templates with sample variables, so
+ * the settings card previews exactly what a real push would look like;
+ * without it, sends the free-form title/body. Response reports the real 2xx
+ * accepted count. `getCfg` reads the live settings (apply wires it; tests
+ * pass a static object). */
+export async function handleTest(pushState, getCfg, req, res) {
   if (req.method !== 'POST') {
     res.setHeader('Allow', 'POST')
     responseJson(res, 405, { ok: false, error: { code: 'method-not-allowed', message: 'Use POST' } })
@@ -288,10 +386,22 @@ export async function handleTest(pushState, req, res) {
     responseJson(res, 400, { ok: false, error: { code: 'bad-json', message: 'body must be JSON' } })
     return
   }
-  const title = typeof parsed.title === 'string' && parsed.title.trim() !== '' ? parsed.title.trim().slice(0, 80) : 'DSH 测试通知'
-  const body = typeof parsed.body === 'string' ? parsed.body.slice(0, 200) : '如果你看到了它，推送链路是通的。'
+  const sample = TEST_SAMPLES[parsed.kind]
+  let title
+  let body
+  if (sample !== undefined) {
+    // Live-template preview: sample variables are always filled (they are
+    // samples, not conversation content), regardless of includeSummary.
+    const cfg = (typeof getCfg === 'function' ? getCfg() : null) || {}
+    const preview = renderTexts(parsed.kind, sample, { ...cfg, includeSummary: true })
+    title = preview.title
+    body = preview.body
+  } else {
+    title = typeof parsed.title === 'string' && parsed.title.trim() !== '' ? parsed.title.trim().slice(0, 80) : 'DSH 测试通知'
+    body = typeof parsed.body === 'string' ? parsed.body.slice(0, 200) : '如果你看到了它，推送链路是通的。'
+  }
   const { sent } = await pushState.broadcast({ title, body, tag: 'dsh-test', url: '/' }, PUSH_POLICY.test)
-  responseJson(res, 200, { ok: true, sent })
+  responseJson(res, 200, { ok: true, sent, title, body })
 }
 
 // ---------------------------------------------------------------------------
@@ -361,7 +471,7 @@ export function handleVapid(pushState, req, res) {
     responseJson(res, 405, { ok: false, error: { code: 'method-not-allowed', message: 'Use GET' } })
     return
   }
-  responseJson(res, 200, { ok: true, publicKey: pushState.vapidPublicKey() })
+  responseJson(res, 200, { ok: true, publicKey: pushState.vapidPublicKey(), subscriptions: pushState.subscriptions().length })
 }
 
 // ---------------------------------------------------------------------------
@@ -392,12 +502,13 @@ async function loadAsset(name) {
 /**
  * The single prefix route: static assets + push management + test.
  * @param {ReturnType<typeof createPushState>} pushState
+ * @param {Function} getCfg live-settings accessor for the /test preview.
  */
-export async function handleRoute(pushState, req, res) {
+export async function handleRoute(pushState, getCfg, req, res) {
   const url = new URL(req.url ?? '/', 'http://dsh.internal')
   const rel = url.pathname.slice(BASE.length).replace(/^\/+/, '').replace(/\/+$/, '')
   try {
-    if (rel === 'test') return await handleTest(pushState, req, res)
+    if (rel === 'test') return await handleTest(pushState, getCfg, req, res)
     if (rel === 'subscribe') return await handleSubscribe(pushState, req, res)
     if (rel === 'unsubscribe') return await handleUnsubscribe(pushState, req, res)
     if (rel === 'vapid') return handleVapid(pushState, req, res)
@@ -579,15 +690,48 @@ export function apply(ctx, config = {}) {
     const v = config[key]
     return typeof v === 'string' && v.trim() !== '' ? v.trim() : DEFAULT_CONFIG[key]
   }
+  // Live configuration. The static knobs (grace/debounce/subject/push/tool)
+  // come from the plugin row; the user-owned knobs (toggles + text templates)
+  // are overwritten live from the settings namespace below the moment it
+  // mounts, and on every change thereafter.
   const cfg = {
+    approvalEnabled: true,
+    questionEnabled: true,
     turnEndEnabled: config.turnEnd === true,
     approvalGraceMs: num('approvalGraceMs'),
     debounceMs: num('debounceMs'),
     includeSummary: config.includeSummary === true,
+    texts: {},
     notifyTool: config.notifyTool !== false,
     vapidSubject: str('vapidSubject'),
     push: config.push !== false,
   }
+
+  // --- live user settings (Settings → 通知推送 card) -----------------------
+  // Registered when the settings service mounts (the Web composition ships
+  // dsh-settings-file); without one the row config applies as above.
+  ctx.inject(['settings'], (sctx) => {
+    const scope = sctx.settings.register('dsh-pwa-notify', SettingsSchema, {
+      base: { turnEndPush: config.turnEnd === true, includeSummary: config.includeSummary === true },
+    })
+    const applyLive = () => {
+      const value = scope.get()
+      cfg.approvalEnabled = value.approvalPush !== false
+      cfg.questionEnabled = value.questionPush !== false
+      cfg.turnEndEnabled = value.turnEndPush === true
+      cfg.includeSummary = value.includeSummary === true
+      cfg.texts = {
+        approvalTitle: value.textApprovalTitle,
+        approvalBody: value.textApprovalBody,
+        questionTitle: value.textQuestionTitle,
+        questionBody: value.textQuestionBody,
+        turnTitle: value.textTurnTitle,
+        turnBody: value.textTurnBody,
+      }
+    }
+    applyLive()
+    scope.watch(applyLive)
+  })
 
   // Real Web Push state (VAPID keys + subscriptions). With the poll channel
   // gone this is THE notification transport: an unavailable state dir or no
@@ -695,7 +839,8 @@ export function apply(ctx, config = {}) {
           handler: (req, res) =>
             // Push disabled: /vapid and /subscribe answer with an explicit
             // error, /test reports sent:0 — the route table stays uniform.
-            handleRoute(pushState !== null ? pushState : nullPushState(), req, res),
+            // getCfg reads live settings for the /test template preview.
+            handleRoute(pushState !== null ? pushState : nullPushState(), () => cfg, req, res),
         }),
       'dsh-pwa-notify: pwa routes',
     )

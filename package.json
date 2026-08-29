@@ -1,7 +1,7 @@
 {
   "name": "dsh-pwa-notify",
-  "version": "0.3.0",
-  "description": "PWA install + real Web Push notifications for the DeepSeek Harness Web GUI: manifest + service worker + icons served by DSH itself (no gateway subprocess), VAPID/aes128gcm push (RFC 8291+8292 hand-rolled on node:crypto, zero npm deps) that reaches the lock screen even after iOS kills the app, a poll fallback channel, and a notify_user model tool.",
+  "version": "0.4.0",
+  "description": "PWA install + real Web Push notifications for the DeepSeek Harness Web GUI: manifest + service worker + icons served by DSH itself (no gateway subprocess), VAPID/aes128gcm push (RFC 8291+8292 hand-rolled on node:crypto) that reaches the lock screen even after iOS kills the app, a live Settings card (per-kind toggles, custom notification text templates, test-send buttons), and a notify_user model tool.",
   "type": "module",
   "main": "./src/index.js",
   "exports": {
@@ -25,8 +25,17 @@
     "client": {
       "platform": "web",
       "inject": [
-        "@deepseek-ai/dsh-client-runtime"
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-settings"
       ]
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/schemastery": {
+      "optional": true
     }
   },
   "keywords": [

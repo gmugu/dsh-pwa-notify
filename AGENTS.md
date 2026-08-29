@@ -17,9 +17,11 @@
 - **VAPID 密钥必须持久化**：`$DSH_HOME/pwa-notify-state.json` 里的密钥对一旦重新生成，所有已订阅设备全部失效。状态文件原子写（tmp+rename），`createPushState` 的状态是每实例闭包——**不要**用共享默认对象浅拷贝初始化（曾因此让一个实例的订阅漏进下一个实例）。
 - **推送是唯一通知通道**（用户决定移除轮询兜底）：事件腿统一走 `apply` 里的 `emit()`（fire-and-forget 广播）；`notify_user` 工具与 `/test` 直接 `await pushState.broadcast()` 拿真实 2xx 送达数。不要 reintroduce 缓冲/轮询通道——一条推送失败即丢失是**已接受的取舍**，设备下次打开应用时自动重订阅自愈。
 - **SW 永远不加 fetch handler**：DSH 的 JS/CSS 每次部署都变且文件名不变，任何缓存策略都会造成「新 DOM + 旧 CSS」（dsh-zen-remote sw v2→v3 的事故复盘）。本插件的 SW 只做通知展示（push 事件 + showNotification）和点击聚焦。
-- **通知策略保持「需要你才响」**：等授权 / 等回答恒开且不受 debounce 压制；回合结束默认关、子代理永远不推。这些语义来自 dsh-zen-remote 的行为变更历史（1.0.3 起回合结束默认不推），不要「顺手改默认值」。
+- **通知策略保持「需要你才响」**：等授权 / 等回答默认开且不受 debounce 压制（设置卡片可关——用户明确要求的开关）；回合结束默认关、子代理永远不推。默认语义来自 dsh-zen-remote 的行为变更历史（1.0.3 起回合结束默认不推），不要「顺手改默认值」。
 - **决策层必须是纯函数**：`decideNotification` / `turnSummary` / `assistantText` / `pendingQuestionText` 全部纯函数导出，测试不经真实会话（建真实会话耗 token，是工作区硬约束）。宿主侧接线（`apply`）只做薄封装。
 - **工具名是 `notify_user` 不是 `push_notify`**：刻意与 dsh-zen-remote 区分（避免同装冲突）。注册包 try/catch：与部署里同名工具撞名时降级为告警，不许把插件行带崩。
+- **schemastery 依赖只经 symlink**：`node_modules/@deepseek-ai/schemastery → 宿主 dsh 安装内的同名包`（dsh-login-gate 同款做法），供 `settings.register` 的 schema 使用；包声明为 optional peerDependency，npm 安装场景由 profile 图解析。**不要**在包里 npm install 真实依赖，也不要删除这个 symlink（settings 命名空间会挂）。
+- **设置是双层的**：用户层（开关 + 文案模板）走 `settings.register('dsh-pwa-notify', SettingsSchema)`，`scope.watch` 热更新 `apply` 里的 `cfg`；行配置只提供静态项（grace/debounce/subject/push/tool）和 `turnEndPush`/`includeSummary` 的 base 初始值。`renderTexts` 是纯函数，`decideNotification` 和 `/test` 预览共用——改文案逻辑必须同时过两边的测试。
 - **图标是生成物**：改 `scripts/gen-icons.mjs` 后跑 `npm run icons` 并提交 `pwa/icons/`。PNG 编码器手写在脚本里（CRC32 + zlib），别引入 sharp 之类的依赖。
 
 ## 3. 加载与工作机制
@@ -41,7 +43,7 @@
 ## 4. 命令
 
 ```sh
-npm test        # node --test：15 个用例（策略、路由、RFC 8291 向量、VAPID JWT、推送广播）
+npm test        # node --test：18 个用例（策略、开关、文案模板、路由、RFC 8291 向量、VAPID JWT、推送广播）
 npm run icons   # 重新生成 pwa/icons/*.png
 ```
 
