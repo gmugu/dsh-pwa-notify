@@ -48,7 +48,7 @@ npm run icons   # 重新生成 pwa/icons/*.png
 
 - **手写 Web Push 而不是 `web-push` 依赖**：本插件经 `link:` 安装，pnpm 不会为 link 包装它自己的依赖；手写 RFC 8291/8292（node:crypto 全有原语）+ RFC 已知答案向量测试，比在插件目录里养第二套 node_modules 可靠。
 - **Node 的 `dsaEncoding` 有两种拼写**：`'ieee-p1363'`（v22.x 实测）与 `'ieee-p1363-format'`（上游），`es256RawSign` 两种都试。undici 的 fetch **不允许手设 `Content-Length`**（报 invalid content-length header），长度由 body 自动推导。
-- **轮询而非 SSE/WebSocket**：SSE 长连接在后台标签页会被浏览器掐掉，轮询（后台 8s / 前台 40s）更抗 throttling；推送订阅成功后轮询只剩基线推进，不再是显示通道。
+- **轮询而非 SSE/WebSocket**：SSE 长连接在后台标签页会被浏览器掐掉，轮询更抗 throttling。推送订阅成功后轮询**降为 5 分钟心跳**（不展示，只保基线 + 推送静默失败的安全网——大陆服务器直连 FCM 不通、订阅过期都是真实场景）；展示通道由 SW 的 push 事件独占。
 - **`approvalGraceMs` 默认 5s**：模型答复器（dsh-auto-approve 类）实测平均 2.4s；窗口太短会推「等你授权」但框从未出现（zen-remote 踩过）。
 - **同源校验只盖 POST（test/subscribe/unsubscribe）**：poll 与静态文件是只读的，GET 不需要 CSRF 防护；推送发送在 host 内部发起，不经过浏览器。
 - **登录门兼容**：本部署装有 dsh-login-gate 时，全部路由经它过鉴权，已登录页面无感；推送唤醒走推送服务商→系统→SW，完全不经过 DSH，登录门不影响锁屏送达。

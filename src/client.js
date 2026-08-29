@@ -36,8 +36,16 @@ window.__ModuleLoader__.load({
     const CID_KEY = 'dsh-pwa-notify-cid'
     const CARD_ID = 'dsh-pwa-notify-card'
     const SNOOZE_MS = 7 * 24 * 3600 * 1000
+    // Poll channel cadence. Hidden/visible pair drives the FALLBACK channel
+    // (notifications to pages without a push subscription). Once push is
+    // live the poll demotes to a slow heartbeat: it no longer displays
+    // anything (the SW's push event owns that), it only keeps the sequence
+    // baseline fresh and acts as a dead-man check for silently broken push
+    // (expired subscription, unreachable push service) — a 5-minute-late
+    // notification beats a silently lost one.
     const POLL_HIDDEN_MS = 8000
     const POLL_VISIBLE_MS = 40000
+    const POLL_PUSH_READY_MS = 5 * 60 * 1000
     const ICON = BASE + '/icon-192.png'
 
     const state = {
@@ -136,6 +144,8 @@ window.__ModuleLoader__.load({
         })
         if (!res.ok) return false
         state.pushReady = true
+        // Demote the poll to a heartbeat now that push owns display.
+        if (state.booted) schedule()
         return true
       } catch (err) {
         console.warn('[dsh-pwa-notify] push subscribe failed:', err)
@@ -237,11 +247,14 @@ window.__ModuleLoader__.load({
 
     function schedule() {
       if (state.timer !== null) clearInterval(state.timer)
-      state.timer = setInterval(pollOnce, document.hidden ? POLL_HIDDEN_MS : POLL_VISIBLE_MS)
+      const interval = state.pushReady ? POLL_PUSH_READY_MS : document.hidden ? POLL_HIDDEN_MS : POLL_VISIBLE_MS
+      state.timer = setInterval(pollOnce, interval)
     }
 
     function onVisibilityChange() {
-      if (document.hidden) pollOnce()
+      // Immediate poll on hide serves the fallback channel only; a
+      // push-subscribed client hears from the SW's push event instead.
+      if (document.hidden && !state.pushReady) pollOnce()
       schedule()
     }
 
