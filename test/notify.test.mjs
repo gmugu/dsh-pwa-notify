@@ -5,6 +5,10 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { createPushState } from '../src/webpush.js'
 import {
   decideNotification,
   assistantText,
@@ -238,33 +242,41 @@ test('handleTest: same-origin enforced, body capped, enqueues test item', async 
 })
 
 test('handleRoute: 404 unknown, sw.js carries Service-Worker-Allowed, manifest served', async () => {
-  const store = createNotifyStore()
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-pwa-notify-'))
+  try {
+    const store = createNotifyStore()
+    const push = createPushState({ stateFile: join(dir, 'state.json') })
+    const emit = (kind, title, body, tag) => store.push(kind, title, body, tag)
 
-  const res404 = mockRes()
-  await handleRoute(store, mockReq({ url: `${BASE}/nope.png` }), res404)
-  assert.equal(res404.state.status, 404)
+    const res404 = mockRes()
+    await handleRoute(store, push, emit, mockReq({ url: `${BASE}/nope.png` }), res404)
+    assert.equal(res404.state.status, 404)
 
-  const resSw = mockRes()
-  await handleRoute(store, mockReq({ url: `${BASE}/sw.js` }), resSw)
-  assert.equal(resSw.state.status, 200)
-  assert.equal(resSw.state.headers['service-worker-allowed'], '/')
-  assert.equal(resSw.state.headers['content-type'], 'text/javascript; charset=utf-8')
-  assert.equal(resSw.state.headers['cache-control'], 'no-cache')
-  assert.ok(resSw.state.body.includes('notificationclick'))
+    const resSw = mockRes()
+    await handleRoute(store, push, emit, mockReq({ url: `${BASE}/sw.js` }), resSw)
+    assert.equal(resSw.state.status, 200)
+    assert.equal(resSw.state.headers['service-worker-allowed'], '/')
+    assert.equal(resSw.state.headers['content-type'], 'text/javascript; charset=utf-8')
+    assert.equal(resSw.state.headers['cache-control'], 'no-cache')
+    assert.ok(resSw.state.body.includes('notificationclick'))
+    assert.ok(resSw.state.body.includes('push'))
 
-  const resManifest = mockRes()
-  await handleRoute(store, mockReq({ url: `${BASE}/manifest.json` }), resManifest)
-  assert.equal(resManifest.state.status, 200)
-  assert.equal(resManifest.state.headers['content-type'], 'application/manifest+json; charset=utf-8')
-  const manifest = JSON.parse(resManifest.state.body)
-  assert.equal(manifest.display, 'standalone')
-  assert.ok(manifest.icons.length >= 2)
+    const resManifest = mockRes()
+    await handleRoute(store, push, emit, mockReq({ url: `${BASE}/manifest.json` }), resManifest)
+    assert.equal(resManifest.state.status, 200)
+    assert.equal(resManifest.state.headers['content-type'], 'application/manifest+json; charset=utf-8')
+    const manifest = JSON.parse(resManifest.state.body)
+    assert.equal(manifest.display, 'standalone')
+    assert.ok(manifest.icons.length >= 2)
 
-  const resIcon = mockRes()
-  await handleRoute(store, mockReq({ url: `${BASE}/icon-192.png` }), resIcon)
-  assert.equal(resIcon.state.status, 200)
-  assert.equal(resIcon.state.headers['content-type'], 'image/png')
-  assert.equal(resIcon.state.body.subarray(1, 4).toString('ascii'), 'PNG')
+    const resIcon = mockRes()
+    await handleRoute(store, push, emit, mockReq({ url: `${BASE}/icon-192.png` }), resIcon)
+    assert.equal(resIcon.state.status, 200)
+    assert.equal(resIcon.state.headers['content-type'], 'image/png')
+    assert.equal(resIcon.state.body.subarray(1, 4).toString('ascii'), 'PNG')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 function sleep(ms) {

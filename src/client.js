@@ -8,13 +8,18 @@
  *   2. asks for notification permission through an opt-in bottom card
  *      (7-day snooze, iOS installed-PWA hint — the flow dsh-zen-remote's
  *      pwa/inject.js proved out);
- *   3. polls /_dsh/pwa-notify/poll?since=<seq> and shows whatever the host's
- *      policy decided through the service worker — so notifications appear
- *      while the DSH page or installed PWA runs in the background.
+ *   3. subscribes to REAL Web Push with the VAPID key the host injects into
+ *      the page (__DSH_PWA_NOTIFY_VAPID__) — iOS only allows this from a
+ *      home-screen install, never a Safari tab, so the card guides there;
+ *   4. polls /_dsh/pwa-notify/poll?since=<seq> as the fallback channel and
+ *      shows whatever the host's policy decided through the service worker
+ *      while the page runs in the background (skipped once push is live, so
+ *      the two channels never double-notify).
  *
- * Display rule: when the page is HIDDEN every item notifies; when VISIBLE
- * only approval/question items do (they may belong to a session the user is
- * not looking at — they are the two kinds that must never be missed).
+ * Display rule for the poll channel: when the page is HIDDEN every item
+ * notifies; when VISIBLE only approval/question items do (they may belong to
+ * a session the user is not looking at). The push channel always notifies —
+ * the SW's push event fires regardless of page state.
  *
  * Disable per browser with ?pwaNotify=0 or localStorage 'dsh-pwa-notify'='0'.
  */
@@ -90,6 +95,54 @@ window.__ModuleLoader__.load({
       return notifSupported() ? window.Notification.permission : 'unsupported'
     }
 
+    function pushSupported() {
+      return swSupported() && notifSupported() && 'PushManager' in window
+    }
+
+    // iOS grants Web Push only to home-screen installs, never to a Safari
+    // tab — attempting subscribe there just errors (zen-remote's finding).
+    function pushAllowedHere() {
+      return pushSupported() && secureOk() && (!isIOS() || isStandalone())
+    }
+
+    /** VAPID public key: injected into the page by the host when push is on;
+     * absent when push: false (then subscribe is simply skipped). */
+    function vapidKeyBytes() {
+      var s = String(window.__DSH_PWA_NOTIFY_VAPID__ || '')
+      if (!s) return undefined
+      s = s.replace(/-/g, '+').replace(/_/g, '/')
+      while (s.length % 4) s += '='
+      var raw = atob(s)
+      var a = new Uint8Array(raw.length)
+      for (var i = 0; i < raw.length; i++) a[i] = raw.charCodeAt(i)
+      return a
+    }
+
+    async function subscribePush() {
+      if (state.pushReady || !pushAllowedHere()) return false
+      var key = vapidKeyBytes()
+      if (!key) return false
+      try {
+        var reg = await swReady()
+        if (!reg) return false
+        var sub = await reg.pushManager.getSubscription()
+        if (!sub) {
+          sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key })
+        }
+        var res = await fetch(BASE + '/subscribe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ subscription: sub.toJSON() }),
+        })
+        if (!res.ok) return false
+        state.pushReady = true
+        return true
+      } catch (err) {
+        console.warn('[dsh-pwa-notify] push subscribe failed:', err)
+        return false
+      }
+    }
+
     function snoozed() {
       try {
         const at = Number(localStorage.getItem(SNOOZE_KEY) || 0)
@@ -157,6 +210,10 @@ window.__ModuleLoader__.load({
         // First poll after load only adopts the current sequence — replaying
         // history would fire a burst of stale notifications on every open.
         if (first || !Array.isArray(data.items) || data.items.length === 0) return
+        // Push-subscribed: the SW's push event already displays these (even
+        // with the page killed); displaying again here would double-notify.
+        // The poll still runs so the sequence baseline stays fresh.
+        if (state.pushReady) return
         const hidden = document.hidden
         const due = data.items.filter((it) => hidden || it.kind === 'approval' || it.kind === 'question')
         if (due.length === 0) return
@@ -239,7 +296,14 @@ window.__ModuleLoader__.load({
     }
 
     function showGrantedCard() {
-      const el = card('🔔 通知已开启', '智能体等你授权 / 提问时会提醒你。想确认链路，发一条试试。', BTN_TEST + BTN_DONE)
+      const viaPush = state.pushReady
+      const el = card(
+        '🔔 通知已开启',
+        viaPush
+          ? '已订阅系统级推送：智能体等你授权、等你回答时会推到锁屏——即使这个应用已被系统杀掉。想确认链路，发一条试试。'
+          : '智能体等你授权 / 提问时会提醒你（本页面在后台时）。想确认链路，发一条试试。',
+        BTN_TEST + BTN_DONE,
+      )
       el.querySelector('[data-act="test"]').addEventListener('click', function () {
         sendTest()
       })
@@ -266,8 +330,12 @@ window.__ModuleLoader__.load({
         el.remove()
         requestPermissionInGesture().then(function (result) {
           if (result === 'granted') {
-            showGrantedCard()
-            pollOnce()
+            // Inside the click's promise chain where possible: Safari wants
+            // the subscribe call tied to the user gesture too.
+            subscribePush().then(function () {
+              showGrantedCard()
+              pollOnce()
+            })
           }
         })
       })
@@ -315,6 +383,8 @@ window.__ModuleLoader__.load({
         return {
           permission: permission(),
           serviceWorker: !!state.reg,
+          pushSubscribed: state.pushReady,
+          pushAllowedHere: pushAllowedHere(),
           lastSeq: state.lastSeq,
           secureContext: secureOk(),
         }
@@ -331,6 +401,10 @@ window.__ModuleLoader__.load({
       schedule()
       state.visibilityListener = onVisibilityChange
       document.addEventListener('visibilitychange', state.visibilityListener)
+      // Returning visitor with permission already granted: resync the push
+      // subscription — the host may have lost it (state reset, failed POST)
+      // and a silent resync needs no prompt (zen-remote's resyncPush).
+      if (permission() === 'granted') subscribePush()
       if (!snoozed() && permission() !== 'granted') showAskCard()
     }
 
@@ -365,6 +439,7 @@ window.__ModuleLoader__.load({
           removeCard()
           state.booted = false
           state.lastSeq = null
+          state.pushReady = false
           // Best-effort: with the plugin gone, its SW has nothing left to
           // say. Unregister keeps scope '/' clean for other PWA plugins
           // (dsh-zen-remote's gateway SW, for one).

@@ -1,7 +1,7 @@
 {
   "name": "dsh-pwa-notify",
-  "version": "0.1.0",
-  "description": "PWA install + local notifications for the DeepSeek Harness Web GUI: manifest + service worker served by DSH itself (no gateway), lock-screen-style notifications when an agent needs approval / asks a question / finishes a turn, and a notify_user model tool. Notifications fire to any device with the DSH page or installed PWA open in the background.",
+  "version": "0.2.0",
+  "description": "PWA install + real Web Push notifications for the DeepSeek Harness Web GUI: manifest + service worker + icons served by DSH itself (no gateway subprocess), VAPID/aes128gcm push (RFC 8291+8292 hand-rolled on node:crypto, zero npm deps) that reaches the lock screen even after iOS kills the app, a poll fallback channel, and a notify_user model tool.",
   "type": "module",
   "main": "./src/index.js",
   "exports": {

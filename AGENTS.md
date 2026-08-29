@@ -11,11 +11,14 @@
 
 ## 2. 硬约束（改动前必读）
 
-- **无构建、无依赖**：两个参考插件里，本插件走的是 dsh-mobile-hanui 的纯 JS 路线。不要引入 TypeScript / 打包器 / npm 依赖（连 `defineTool` 都是手工内联等价物——它只是 schema 包装器，见 `buildNotifyTool` 的注释）。
-- **SW 永远不加 fetch handler**：DSH 的 JS/CSS 每次部署都变且文件名不变，任何缓存策略都会造成「新 DOM + 旧 CSS」（dsh-zen-remote sw v2→v3 的事故复盘）。本插件的 SW 只做通知展示和点击聚焦。
+- **无构建、无依赖**：两个参考插件里，本插件走的是 dsh-mobile-hanui 的纯 JS 路线。不要引入 TypeScript / 打包器 / npm 依赖（连 `defineTool` 都是手工内联等价物——它只是 schema 包装器；Web Push 也是 node:crypto 手写，见下）。
+- **RFC 8291 已知答案向量是加密代码的唯一护栏**：`src/webpush.js` 的 `encryptPayload` 改任何一行（HKDF 接线、点编码、GCM 用法、header 布局），`test/webpush.test.mjs` 的 Appendix A 向量必须仍然逐字节通过。没有它，手写加密错了只会在真手机上静默失败。
+- **VAPID 密钥必须持久化**：`$DSH_HOME/pwa-notify-state.json` 里的密钥对一旦重新生成，所有已订阅设备全部失效。状态文件原子写（tmp+rename），`createPushState` 的状态是每实例闭包——**不要**用共享默认对象浅拷贝初始化（曾因此让一个实例的订阅漏进下一个实例）。
+- **双通道去重靠 `emit` 单一入口**：所有通知（事件腿 / 工具腿 / 测试）必须走 `apply` 里的 `emit()`（环形缓冲 + 推送广播），不要直接调 `store.push`，否则轮询通道和推送通道会对同一事件各响一次。客户端侧的对应约束：`pushReady` 后轮询只推进基线不再展示。
+- **SW 永远不加 fetch handler**：DSH 的 JS/CSS 每次部署都变且文件名不变，任何缓存策略都会造成「新 DOM + 旧 CSS」（dsh-zen-remote sw v2→v3 的事故复盘）。本插件的 SW 只做通知展示（push 事件 + showNotification）和点击聚焦。
 - **通知策略保持「需要你才响」**：等授权 / 等回答恒开且不受 debounce 压制；回合结束默认关、子代理永远不推。这些语义来自 dsh-zen-remote 的行为变更历史（1.0.3 起回合结束默认不推），不要「顺手改默认值」。
 - **决策层必须是纯函数**：`decideNotification` / `turnSummary` / `assistantText` / `pendingQuestionText` 全部纯函数导出，测试不经真实会话（建真实会话耗 token，是工作区硬约束）。宿主侧接线（`apply`）只做薄封装。
-- **工具名是 `notify_user` 不是 `push_notify`**：刻意与 dsh-zen-remote 区分（避免同装冲突），且语义不同（本地通知，不是推送）。描述里必须写清 LOCAL-ONLY 送达范围。
+- **工具名是 `notify_user` 不是 `push_notify`**：刻意与 dsh-zen-remote 区分（避免同装冲突）。注册包 try/catch：与部署里同名工具撞名时降级为告警，不许把插件行带崩。
 - **图标是生成物**：改 `scripts/gen-icons.mjs` 后跑 `npm run icons` 并提交 `pwa/icons/`。PNG 编码器手写在脚本里（CRC32 + zlib），别引入 sharp 之类的依赖。
 
 ## 3. 加载与工作机制
@@ -37,16 +40,18 @@
 ## 4. 命令
 
 ```sh
-npm test        # node --test：12 个用例（策略、缓冲、路由、同源校验）
+npm test        # node --test：18 个用例（策略、缓冲、路由、RFC 8291 向量、VAPID JWT、推送广播）
 npm run icons   # 重新生成 pwa/icons/*.png
 ```
 
 ## 5. 已知取舍记录
 
-- **轮询而非 SSE/WebSocket**：SSE 长连接在后台标签页会被浏览器掐掉，轮询（后台 8s / 前台 40s）更抗 throttling，实现也更小。代价是平均 4 秒延迟——对「等你授权」这类通知可接受。
+- **手写 Web Push 而不是 `web-push` 依赖**：本插件经 `link:` 安装，pnpm 不会为 link 包装它自己的依赖；手写 RFC 8291/8292（node:crypto 全有原语）+ RFC 已知答案向量测试，比在插件目录里养第二套 node_modules 可靠。
+- **Node 的 `dsaEncoding` 有两种拼写**：`'ieee-p1363'`（v22.x 实测）与 `'ieee-p1363-format'`（上游），`es256RawSign` 两种都试。undici 的 fetch **不允许手设 `Content-Length`**（报 invalid content-length header），长度由 body 自动推导。
+- **轮询而非 SSE/WebSocket**：SSE 长连接在后台标签页会被浏览器掐掉，轮询（后台 8s / 前台 40s）更抗 throttling；推送订阅成功后轮询只剩基线推进，不再是显示通道。
 - **`approvalGraceMs` 默认 5s**：模型答复器（dsh-auto-approve 类）实测平均 2.4s；窗口太短会推「等你授权」但框从未出现（zen-remote 踩过）。
-- **同源校验只盖 `POST /test`**：poll 与静态文件是只读的，GET 不需要 CSRF 防护；`notify_user` 工具在 host 内部入队，不经过浏览器。
-- **登录门兼容**：本部署装有 dsh-login-gate 时，全部路由经它过鉴权，已登录页面无感；唯一影响是未登录 SW 更新检查可能 401（无功能影响）。
+- **同源校验只盖 POST（test/subscribe/unsubscribe）**：poll 与静态文件是只读的，GET 不需要 CSRF 防护；推送发送在 host 内部发起，不经过浏览器。
+- **登录门兼容**：本部署装有 dsh-login-gate 时，全部路由经它过鉴权，已登录页面无感；推送唤醒走推送服务商→系统→SW，完全不经过 DSH，登录门不影响锁屏送达。
 
 ## 6. 发布
 

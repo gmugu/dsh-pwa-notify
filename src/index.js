@@ -7,10 +7,10 @@
  *   - dsh-zen-remote contributes the notification POLICY (approval/asked with
  *     a grace window, ask_user_question, opt-in turn-end, the notify-tool
  *     throttle) and the PWA asset set (manifest + service worker + icons).
- *     Its transport is a gateway subprocess doing real VAPID Web Push; here
- *     the transport is much lighter — the DSH host itself serves the PWA files
- *     and a small poll feed, and the CLIENT shows the notification through
- *     the service worker while the page/PWA is open in the background.
+ *     Its transport is a gateway subprocess running the `web-push` library;
+ *     here the DSH host itself does REAL VAPID Web Push (src/webpush.js,
+ *     RFC 8291 + 8292 hand-rolled on node:crypto) AND serves the PWA files,
+ *     with a page-poll feed as the no-push fallback channel.
  *   - dsh-mobile-hanui contributes the packaging: zero npm dependencies, a
  *     plain-JS host entry + client bundle discovered via `dsh.client`, one
  *     `cordis.patch.yml` insert row, no build step.
@@ -19,13 +19,15 @@
  *   1. serve /_dsh/pwa-notify/{sw.js,manifest.json,icon-*.png} through the
  *      `webServer` service (the SW response carries Service-Worker-Allowed: /
  *      so a script living under /_dsh/pwa-notify/ may control scope "/");
- *   2. inject <link rel="manifest"> + theme-color into index.html through the
- *      structured `webserver/index-inject` event;
+ *   2. inject <link rel="manifest"> + theme-color + the VAPID public key into
+ *      index.html through the structured `webserver/index-inject` event;
  *   3. listen to `session/event` + `agent/turn-stopping`, decide notifications
- *      with a pure policy function (exported for tests), and buffer the
- *      decided ones in a small sequence-numbered ring;
- *   4. expose GET /_dsh/pwa-notify/poll?since=<seq> for the client feed and
- *      POST /_dsh/pwa-notify/test for the "send a test notification" button;
+ *      with a pure policy function (exported for tests), buffer the decided
+ *      ones in a small sequence-numbered ring, AND broadcast them as
+ *      aes128gcm-encrypted Web Push to every subscribed device;
+ *   4. expose GET /_dsh/pwa-notify/poll?since=<seq> for the client feed,
+ *      POST /_dsh/pwa-notify/test for the "send a test notification" button,
+ *      and POST /subscribe + /unsubscribe + GET /vapid for the push channel;
  *   5. optionally register the `notify_user` model tool (hand-built
  *      ToolDefinition — `defineTool` is a thin schema wrapper, avoiding an
  *      import this package would have to declare as a dependency) plus a
@@ -39,11 +41,18 @@
  */
 
 import { readFile } from 'node:fs/promises'
+import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { createPushState } from './webpush.js'
 
 /** All host routes live under this prefix (one `prefix` webServer route). */
 export const BASE = '/_dsh/pwa-notify'
+
+/** Push state (VAPID keys + subscriptions) lives beside the DSH config. */
+export function defaultStateFile(env = process.env) {
+  return join(env.DSH_HOME ?? join(homedir(), '.dsh'), 'pwa-notify-state.json')
+}
 
 /** Plugin-row config with shipped defaults (see README for the knob table). */
 export const DEFAULT_CONFIG = {
@@ -62,6 +71,21 @@ export const DEFAULT_CONFIG = {
   includeSummary: false,
   /** Register the notify_user model tool + prompt guidance. */
   notifyTool: true,
+  /** RFC 8292 VAPID contact. Apple REJECTS the placeholder on iOS — set a
+   * real mailto: or https: URL (zen-remote ships the same requirement). */
+  vapidSubject: 'mailto:admin@localhost',
+  /** Web Push switch. Off leaves the local poll channel only. */
+  push: true,
+}
+
+/** Per-kind push envelope policy: how long a queued push may linger on the
+ * push service (TTL seconds) and how insistently the device surfaces it. */
+export const PUSH_POLICY = {
+  approval: { ttl: 900, urgency: 'high' },
+  question: { ttl: 900, urgency: 'high' },
+  'turn-end': { ttl: 900, urgency: 'normal' },
+  model: { ttl: 900, urgency: 'high' },
+  test: { ttl: 60, urgency: 'normal' },
 }
 
 /** How long a buffered notification stays deliverable through the poll feed. */
@@ -313,8 +337,10 @@ export async function handlePoll(store, req, res) {
   responseJson(res, 200, { ok: true, seq, items })
 }
 
-/** POST {BASE}/test {title?, body?} — the "send a test notification" button. */
-export async function handleTest(store, req, res) {
+/** POST {BASE}/test {title?, body?} — the "send a test notification" button.
+ * `emit` is the shared sink that buffers AND broadcasts; omit it (tests) to
+ * touch the ring only. */
+export async function handleTest(store, req, res, emit) {
   if (req.method !== 'POST') {
     res.setHeader('Allow', 'POST')
     responseJson(res, 405, { ok: false, error: { code: 'method-not-allowed', message: 'Use POST' } })
@@ -339,8 +365,78 @@ export async function handleTest(store, req, res) {
   }
   const title = typeof parsed.title === 'string' && parsed.title.trim() !== '' ? parsed.title.trim().slice(0, 80) : 'DSH 测试通知'
   const body = typeof parsed.body === 'string' ? parsed.body.slice(0, 200) : '如果你看到了它，通知链路是通的。'
-  const seq = store.push('test', title, body, 'dsh-test')
+  const seq = emit ? emit('test', title, body, 'dsh-test') : store.push('test', title, body, 'dsh-test')
   responseJson(res, 200, { ok: true, seq })
+}
+
+// ---------------------------------------------------------------------------
+// Web Push routes (subscription management + VAPID public key).
+// ---------------------------------------------------------------------------
+
+const SUB_BODY_MAX = 8192
+
+/** POST {BASE}/subscribe {subscription:{endpoint, keys:{p256dh, auth}}} —
+ * register one browser/app for real Web Push (VAPID-keyed, persisted). */
+export async function handleSubscribe(pushState, req, res) {
+  if (req.method !== 'POST') {
+    res.setHeader('Allow', 'POST')
+    responseJson(res, 405, { ok: false, error: { code: 'method-not-allowed', message: 'Use POST' } })
+    return
+  }
+  if (!sameOriginPost(req)) {
+    responseJson(res, 403, { ok: false, error: { code: 'origin-rejected', message: 'The request must originate from this DSH Web application' } })
+    return
+  }
+  const raw = await readBody(req, SUB_BODY_MAX)
+  if (raw === null) {
+    responseJson(res, 413, { ok: false, error: { code: 'too-large', message: 'subscription payload exceeds the 8192-byte limit' } })
+    return
+  }
+  let sub
+  try {
+    sub = JSON.parse(raw).subscription
+  } catch {
+    sub = undefined
+  }
+  try {
+    const subscriptions = pushState.addSubscription(sub)
+    responseJson(res, 200, { ok: true, subscriptions })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    responseJson(res, 400, { ok: false, error: { code: 'bad-subscription', message } })
+  }
+}
+
+/** POST {BASE}/unsubscribe {endpoint} — drop one subscription. */
+export async function handleUnsubscribe(pushState, req, res) {
+  if (req.method !== 'POST') {
+    res.setHeader('Allow', 'POST')
+    responseJson(res, 405, { ok: false, error: { code: 'method-not-allowed', message: 'Use POST' } })
+    return
+  }
+  if (!sameOriginPost(req)) {
+    responseJson(res, 403, { ok: false, error: { code: 'origin-rejected', message: 'The request must originate from this DSH Web application' } })
+    return
+  }
+  const raw = await readBody(req, SUB_BODY_MAX)
+  let endpoint = ''
+  try {
+    endpoint = String(JSON.parse(raw).endpoint || '')
+  } catch {
+    endpoint = ''
+  }
+  const removed = pushState.removeSubscription(endpoint)
+  responseJson(res, 200, { ok: true, removed })
+}
+
+/** GET {BASE}/vapid — the public key clients subscribe with. */
+export function handleVapid(pushState, req, res) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    res.setHeader('Allow', 'GET, HEAD')
+    responseJson(res, 405, { ok: false, error: { code: 'method-not-allowed', message: 'Use GET' } })
+    return
+  }
+  responseJson(res, 200, { ok: true, publicKey: pushState.vapidPublicKey() })
 }
 
 // ---------------------------------------------------------------------------
@@ -369,15 +465,20 @@ async function loadAsset(name) {
 }
 
 /**
- * The single prefix route: static assets + poll + test.
+ * The single prefix route: static assets + poll + test + push management.
  * @param {ReturnType<typeof createNotifyStore>} store
+ * @param {ReturnType<typeof createPushState>} pushState
+ * @param {Function} emit the shared sink (ring + broadcast), for /test.
  */
-export async function handleRoute(store, req, res) {
+export async function handleRoute(store, pushState, emit, req, res) {
   const url = new URL(req.url ?? '/', 'http://dsh.internal')
   const rel = url.pathname.slice(BASE.length).replace(/^\/+/, '').replace(/\/+$/, '')
   try {
     if (rel === 'poll') return await handlePoll(store, req, res)
-    if (rel === 'test') return await handleTest(store, req, res)
+    if (rel === 'test') return await handleTest(store, req, res, emit)
+    if (rel === 'subscribe') return await handleSubscribe(pushState, req, res)
+    if (rel === 'unsubscribe') return await handleUnsubscribe(pushState, req, res)
+    if (rel === 'vapid') return handleVapid(pushState, req, res)
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       res.setHeader('Allow', 'GET, HEAD')
       responseJson(res, 405, { ok: false, error: { code: 'method-not-allowed', message: 'Use GET' } })
@@ -407,8 +508,8 @@ export async function handleRoute(store, req, res) {
 
 // ---------------------------------------------------------------------------
 // notify_user model tool (the "model leg", ported from zen-remote's
-// push_notify and renamed: delivery is local-page-only, and a distinct name
- // avoids colliding with zen-remote's push_notify when both are installed).
+// push_notify and renamed: a distinct name avoids colliding with zen-remote's
+// push_notify when both are installed).
 // ---------------------------------------------------------------------------
 
 /** The single source of "when should you notify me" — embedded verbatim in
@@ -425,19 +526,20 @@ export const NOTIFY_GUIDANCE =
   'to buzz someone\'s phone.'
 
 const NOTIFY_DESCRIPTION =
-  'Show a local notification on the user\'s DSH page or installed PWA. ' +
-  'Delivery is LOCAL-ONLY: it reaches devices where the DSH Web UI (browser tab or home-screen PWA) is ' +
-  'currently open — including running in the background — and nothing else; a fully closed app will not ' +
-  'receive it. ' +
+  'Raise a notification on the user\'s devices — lock screen included — via the DSH PWA. ' +
+  'Delivery reaches every device subscribed to this deployment\'s Web Push (installed home-screen PWA on ' +
+  'iOS; browser or PWA elsewhere), plus any device with the DSH page currently open in the background. ' +
+  'Pushes are end-to-end encrypted (aes128gcm); the push provider only ever sees ciphertext. ' +
   NOTIFY_GUIDANCE +
   ' Calls are throttled (at most 1 per 60 seconds in this session, 20 total per hour across all sessions); ' +
   'calling too often gets the call silently dropped. `title` must be a short, complete sentence that fits ' +
-  'on one notification line; `body` is optional detail shown when expanded. Returns how many listening ' +
-  'clients received it, or throttled:true when the rate limit dropped the call.'
+  'on one notification line; `body` is optional detail shown when expanded. Returns how many devices ' +
+  'received it, or throttled:true when the rate limit dropped the call.'
 
 const NOTIFY_SECTION =
-  'Reaching the user away from the window: this deployment can raise a local notification on the user\'s ' +
-  'DSH page or installed PWA with the `notify_user` tool. ' + NOTIFY_GUIDANCE +
+  'Reaching the user away from the window: this deployment can raise a notification on the user\'s ' +
+  'devices — lock screen included — with the `notify_user` tool, via the DSH PWA\'s Web Push subscription ' +
+  '(and any open DSH page). ' + NOTIFY_GUIDANCE +
   ' The harness already notifies on its own whenever a tool is waiting for authorization or an ' +
   '`ask_user_question` is unanswered, so you never need `notify_user` for those two.'
 
@@ -450,8 +552,12 @@ const NOTIFY_TOOL_GLOBAL_MAX = 20
  * @deepseek-ai/dsh-tools only compiles the schema spec to JSON Schema and
  * wraps execute with validation; constructing the same shape directly keeps
  * this package dependency-free (the registry validates again anyway).
+ * @param {ReturnType<typeof createNotifyStore>} store
+ * @param {ReturnType<typeof createPushState>} pushState
+ * @param {object} gate the shared debounce arm.
+ * @param {Function} emit the shared sink (ring + broadcast).
  */
-export function buildNotifyTool(store, gate) {
+export function buildNotifyTool(store, pushState, gate, emit) {
   const lastSentBySession = new Map()
   let globalSends = []
 
@@ -491,7 +597,7 @@ export function buildNotifyTool(store, gate) {
         properties: {
           delivered: {
             type: 'integer',
-            description: 'Number of DSH pages/PWAs currently listening that received the notification. 0 when nothing is listening (the user has no page open) or the call was throttled.',
+            description: 'Number of devices that received the notification: subscribed push targets plus DSH pages currently listening. 0 when nothing is subscribed or listening, or the call was throttled.',
           },
           throttled: {
             type: 'boolean',
@@ -505,7 +611,7 @@ export function buildNotifyTool(store, gate) {
           type: 'text',
           text: value.throttled
             ? 'notify_user: not sent — rate limit hit (max 1 per 60s per session, 20/hour total).'
-            : `notify_user: delivered to ${value.delivered} listening page(s).`,
+            : `notify_user: delivered to ${value.delivered} device(s)/page(s).`,
         },
       ],
     },
@@ -521,8 +627,8 @@ export function buildNotifyTool(store, gate) {
       gate.arm(now)
       const title = String(args.title ?? '').slice(0, 120)
       const body = args.body === undefined ? '' : String(args.body).slice(0, 300)
-      store.push('model', title, body, 'dsh-notify-user')
-      return { delivered: store.activeClients() }
+      emit('model', title, body, 'dsh-notify-user')
+      return { delivered: pushState.subscriptions().length + store.activeClients() }
     },
   }
 }
@@ -544,15 +650,49 @@ export function apply(ctx, config = {}) {
     const v = config[key]
     return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : DEFAULT_CONFIG[key]
   }
+  const str = (key) => {
+    const v = config[key]
+    return typeof v === 'string' && v.trim() !== '' ? v.trim() : DEFAULT_CONFIG[key]
+  }
   const cfg = {
     turnEndEnabled: config.turnEnd === true,
     approvalGraceMs: num('approvalGraceMs'),
     debounceMs: num('debounceMs'),
     includeSummary: config.includeSummary === true,
     notifyTool: config.notifyTool !== false,
+    vapidSubject: str('vapidSubject'),
+    push: config.push !== false,
   }
 
   const store = createNotifyStore()
+
+  // Real Web Push state (VAPID keys + subscriptions). Unavailable state dir
+  // or no fetch degrades to the poll channel only — the plugin row still
+  // loads and the rest keeps working.
+  let pushState = null
+  if (cfg.push) {
+    try {
+      pushState = createPushState({ stateFile: defaultStateFile(), subject: cfg.vapidSubject })
+    } catch (e) {
+      console.warn(`[dsh-pwa-notify] Web Push disabled: ${String((e && e.message) || e)}`)
+    }
+  }
+
+  /**
+   * The one sink every notification goes through: ring buffer (poll channel)
+   * + broadcast (push channel). Keeping them together is what keeps the two
+   * channels from ever disagreeing about what was sent.
+   */
+  const emit = (kind, title, body, tag) => {
+    const seq = store.push(kind, title, body, tag)
+    if (pushState !== null && pushState.subscriptions().length > 0) {
+      const policy = PUSH_POLICY[kind] ?? { ttl: 900, urgency: 'normal' }
+      pushState
+        .broadcast({ title, body: body || '', tag: tag || 'dsh', url: '/' }, policy)
+        .catch(() => {})
+    }
+    return seq
+  }
 
   // The one piece of mutable debounce state, shared by every automatic leg.
   let lastSent = 0
@@ -570,7 +710,7 @@ export function apply(ctx, config = {}) {
     const decision = gate.decide(input)
     if (decision.shouldNotify) {
       const tag = input.kind + (input.id !== undefined ? `-${input.id}` : '')
-      store.push(input.kind, decision.title, decision.body, `dsh-${tag}`)
+      emit(input.kind, decision.title, decision.body, `dsh-${tag}`)
     }
     return decision
   }
@@ -627,20 +767,25 @@ export function apply(ctx, config = {}) {
     console.warn(`[dsh-pwa-notify] cannot listen on "agent/turn-stopping": ${String((e && e.message) || e)}`)
   }
 
-  // --- PWA assets + poll/test routes --------------------------------------
+  // --- PWA assets + poll/test/subscribe routes ------------------------------
   ctx.inject(['webServer'], (webCtx) => {
     webCtx.effect(
       () =>
         webCtx.webServer.register({
           kind: 'prefix',
           path: BASE,
-          handler: (req, res) => handleRoute(store, req, res),
+          handler: (req, res) =>
+            pushState !== null
+              ? handleRoute(store, pushState, emit, req, res)
+              // Push disabled: still answer /vapid with an explicit error and
+              // keep everything else alive on the poll channel.
+              : handleRoute(store, nullPushState(), emit, req, res),
         }),
       'dsh-pwa-notify: pwa routes',
     )
   })
 
-  // --- Manifest link + theme color in index.html ---------------------------
+  // --- Manifest link + theme color + VAPID key in index.html -----------------
   try {
     ctx.on('webserver/index-inject', (table) => {
       table.push({
@@ -648,6 +793,11 @@ export function apply(ctx, config = {}) {
         placement: 'head',
         html: `<link rel="manifest" href="${BASE}/manifest.json"><meta name="theme-color" content="#0f1115">`,
       })
+      // The VAPID public key, fresh at emit time (first boot generates it
+      // before the first index render can happen).
+      if (cfg.push && pushState !== null) {
+        table.push({ kind: 'global', name: '__DSH_PWA_NOTIFY_VAPID__', value: pushState.vapidPublicKey() })
+      }
     })
   } catch (e) {
     console.warn(`[dsh-pwa-notify] cannot listen on "webserver/index-inject": ${String((e && e.message) || e)}`)
@@ -661,7 +811,16 @@ export function apply(ctx, config = {}) {
     // compositions without them.
     ctx.inject(['tools'], (toolsCtx) => {
       if (!toolsCtx.tools) return
-      toolsCtx.effect(() => toolsCtx.tools.register(buildNotifyTool(store, gate)), 'dsh-pwa-notify: notify_user tool')
+      toolsCtx.effect(() => {
+        try {
+          return toolsCtx.tools.register(buildNotifyTool(store, pushState, gate, emit))
+        } catch (e) {
+          // A name collision with another deployment's notify_user tool must
+          // not take the plugin row down — warn and stay quiet.
+          console.warn(`[dsh-pwa-notify] cannot register notify_user: ${String((e && e.message) || e)}`)
+          return () => {}
+        }
+      }, 'dsh-pwa-notify: notify_user tool')
     })
     ctx.inject(['systemPrompt'], (promptCtx) => {
       if (!promptCtx.systemPrompt) return
@@ -676,6 +835,23 @@ export function apply(ctx, config = {}) {
   console.log(
     `[dsh-pwa-notify] on — approval/question notifications (grace ${cfg.approvalGraceMs}ms); ` +
       `turn-end ${cfg.turnEndEnabled ? 'on' : 'off (set turnEnd: true in the plugin row to enable)'}; ` +
+      `web push ${pushState !== null ? `on (${pushState.subscriptions().length} subscription(s), subject ${cfg.vapidSubject})` : 'off — poll channel only'}; ` +
       `notify_user tool ${cfg.notifyTool ? 'registered when the tools service is present' : 'disabled'}`,
   )
+}
+
+/** Stand-in used when Web Push is disabled: /vapid answers 503, subscribe
+ * refuses, everything else behaves. Keeps the route table unconditional. */
+function nullPushState() {
+  const unavailable = () => {
+    throw new Error('Web Push is disabled on this deployment (push: false)')
+  }
+  return {
+    vapidPublicKey: unavailable,
+    addSubscription: unavailable,
+    removeSubscription: unavailable,
+    subscriptions: () => [],
+    broadcast: async () => ({ sent: 0, failed: 0, pruned: [] }),
+    sendTo: async () => 0,
+  }
 }
