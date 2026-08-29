@@ -1,0 +1,6 @@
+# dsh-pwa-notify bundle patch: host row (PWA static routes + notification event
+# listeners + notify_user tool). The browser half ships via exports["./client"],
+# discovered through package.json's dsh.client declaration.
+- insert:
+    - id: dsh-pwa-notify
+      name: dsh-pwa-notify

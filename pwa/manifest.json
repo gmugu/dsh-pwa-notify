@@ -1,0 +1,21 @@
+{
+  "name": "DeepSeek Harness",
+  "short_name": "DSH",
+  "description": "DeepSeek Harness — your coding agent, as an app, with notifications.",
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0f1115",
+  "theme_color": "#0f1115",
+  "categories": ["developer tools", "productivity", "ai"],
+  "lang": "zh-CN",
+  "dir": "auto",
+  "prefer_related_applications": false,
+  "icons": [
+    { "src": "/_dsh/pwa-notify/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/_dsh/pwa-notify/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/_dsh/pwa-notify/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

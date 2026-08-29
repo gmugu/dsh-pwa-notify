@@ -1,0 +1,56 @@
+{
+  "name": "dsh-pwa-notify",
+  "version": "0.1.0",
+  "description": "PWA install + local notifications for the DeepSeek Harness Web GUI: manifest + service worker served by DSH itself (no gateway), lock-screen-style notifications when an agent needs approval / asks a question / finishes a turn, and a notify_user model tool. Notifications fire to any device with the DSH page or installed PWA open in the background.",
+  "type": "module",
+  "main": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./src/client.js",
+    "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test",
+    "icons": "node scripts/gen-icons.mjs",
+    "prepublishOnly": "npm test"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime"
+      ]
+    }
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "deepseek-harness-plugin",
+    "pwa",
+    "progressive-web-app",
+    "notifications",
+    "service-worker",
+    "mobile",
+    "ai-agent"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "src",
+    "pwa",
+    "scripts",
+    "cordis.patch.yml",
+    "README.md",
+    "AGENTS.md",
+    "LICENSE"
+  ]
+}
