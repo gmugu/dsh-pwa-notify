@@ -50,7 +50,7 @@ npm run icons   # 重新生成 pwa/icons/*.png
 
 ## 5. 已知取舍记录
 
-- **手写 Web Push 而不是 `web-push` 依赖**：本插件经 `link:` 安装，pnpm 不会为 link 包装它自己的依赖；手写 RFC 8291/8292（node:crypto 全有原语）+ RFC 已知答案向量测试，比在插件目录里养第二套 node_modules 可靠。
+- **手写 Web Push 而不是 `web-push` 依赖**：node:crypto 全有原语，加上 RFC 已知答案向量测试兜底，比引入 web-push 及其传递依赖更轻更可靠（早期还因 link: 安装不装依赖；tarball 安装后已无此约束，零传递依赖的好处仍在）。
 - **Node 的 `dsaEncoding` 有两种拼写**：`'ieee-p1363'`（v22.x 实测）与 `'ieee-p1363-format'`（上游），`es256RawSign` 两种都试。undici 的 fetch **不允许手设 `Content-Length`**（报 invalid content-length header），长度由 body 自动推导。
 - **移除轮询是用户决策**：安全网（FCM 不可达、订阅过期时开着的页面仍能收到）换简单性。大陆服务器直连 FCM 不通时通知即丢，直到设备下次打开应用自动重订阅；iPhone/APNs 不受影响。
 - **`approvalGraceMs` 默认 5s**：模型答复器（dsh-auto-approve 类）实测平均 2.4s；窗口太短会推「等你授权」但框从未出现（zen-remote 踩过）。
