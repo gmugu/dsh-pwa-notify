@@ -557,6 +557,7 @@ export const ASSETS = {
   'icon-192.png': { file: 'icons/icon-192.png', type: 'image/png', maxAge: 86400 },
   'icon-512.png': { file: 'icons/icon-512.png', type: 'image/png', maxAge: 86400 },
   'icon-maskable-512.png': { file: 'icons/icon-maskable-512.png', type: 'image/png', maxAge: 86400 },
+  'icon-apple-180.png': { file: 'icons/icon-apple-180.png', type: 'image/png', maxAge: 86400 },
 }
 
 const assetCache = new Map()
@@ -924,7 +925,10 @@ export function apply(ctx, config = {}) {
       table.push({
         kind: 'html',
         placement: 'head',
-        html: `<link rel="manifest" href="${BASE}/manifest.json"><meta name="theme-color" content="#0f1115">`,
+        // apple-touch-icon: iOS home-screen installs read THIS, not the
+        // manifest icons — without it Safari falls back to a page
+        // screenshot. Full-square PNG; iOS applies its own corner mask.
+        html: `<link rel="manifest" href="${BASE}/manifest.json"><link rel="apple-touch-icon" href="${BASE}/icon-apple-180.png"><meta name="theme-color" content="#0f1115">`,
       })
       table.push({ kind: 'style', text: SAFE_AREA_CSS })
       // The VAPID public key, fresh at emit time (first boot generates it

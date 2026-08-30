@@ -1,6 +1,6 @@
 {
   "name": "dsh-pwa-notify",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "PWA install + real Web Push notifications for the DeepSeek Harness Web GUI: manifest + service worker + icons served by DSH itself (no gateway subprocess), VAPID/aes128gcm push (RFC 8291+8292 hand-rolled on node:crypto) that reaches the lock screen even after iOS kills the app, a live Settings card (per-kind toggles, custom notification text templates, test-send buttons), and a notify_user model tool.",
   "type": "module",
   "main": "./src/index.js",

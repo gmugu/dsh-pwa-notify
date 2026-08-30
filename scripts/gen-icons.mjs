@@ -86,6 +86,9 @@ async function renderWhaleIcons() {
     { file: 'icon-512.png', size: 512, radiusRatio: 0.18, whaleRatio: 0.68 },
     // Maskable: full-bleed background + whale well inside the 80% safe zone.
     { file: 'icon-maskable-512.png', size: 512, radiusRatio: 0, whaleRatio: 0.5 },
+    // apple-touch-icon: iOS home screen. FULL SQUARE (iOS rounds it itself —
+    // baked-in rounded corners would show black gaps) and opaque.
+    { file: 'icon-apple-180.png', size: 180, radiusRatio: 0, whaleRatio: 0.62 },
   ]
   for (const t of targets) {
     const png = await sharp(Buffer.from(tileSvg(t.size, { ...t, path }))).png({ compressionLevel: 9 }).toBuffer()
@@ -231,6 +234,7 @@ function renderBellIcons() {
     { file: 'icon-192.png', size: 192, radius: 0.18, contentScale: 1 },
     { file: 'icon-512.png', size: 512, radius: 0.18, contentScale: 1 },
     { file: 'icon-maskable-512.png', size: 512, radius: 0, contentScale: 0.76 },
+    { file: 'icon-apple-180.png', size: 180, radius: 0, contentScale: 0.9 },
   ]
   for (const t of targets) {
     const png = renderBell(t.size, t)
