@@ -1,2 +1,5 @@
 node_modules/
 .refs/
+*.tgz
+.npm-cache/
+.npm-tmp/

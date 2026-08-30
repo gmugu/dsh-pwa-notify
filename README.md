@@ -46,12 +46,24 @@
 
 ## 安装
 
+**开发与正式运行分离**：本仓库目录只是开发区（跑测试、改代码）；live DSH 装的是**打包副本**（tarball，真实文件进 profile store），项目目录怎么改都不影响运行中的服务。
+
+从本仓库安装/升级到某个 DSH 部署：
+
 ```sh
-cd ~/.dsh/profiles/web
-pnpm add dsh-pwa-notify        # 或 link:/path/to/dsh-pwa-notify 本地开发
+npm run install:profile          # 跑测试 → npm pack → 落位 $DSH_HOME/plugins-packages/ → pnpm add 进 profile
+sudo systemctl restart dsh       # 生效（或 npm run install:profile -- --restart 一条龙）
 ```
 
-然后在 `~/.dsh/profiles/web/package.json` 的 `dsh.profile.bundles` 数组里加入 `"dsh-pwa-notify"`，重启 `dsh web`：
+profile 的依赖记为固定路径 `file:../../plugins-packages/dsh-pwa-notify-current.tgz`（文件名固定、内容随版本覆盖），升级永远是「改代码 → `npm run install:profile` → 重启」三步。
+
+从 npm 安装（发布后）：
+
+```sh
+cd ~/.dsh/profiles/web && pnpm add dsh-pwa-notify
+```
+
+两种方式都要在 `~/.dsh/profiles/web/package.json` 的 `dsh.profile.bundles` 数组里加入 `"dsh-pwa-notify"`，重启 `dsh web`：
 
 ```jsonc
 {
