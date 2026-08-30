@@ -23,7 +23,7 @@
 - **schemastery 双供给**：它是正式 `dependencies`（打包安装时由 registry 装进 profile）；**开发目录**里用 `node_modules/@deepseek-ai/schemastery → 宿主 dsh 安装内的同名包` symlink 供给（`npm pack` 不含 node_modules，tarball 里的副本靠 dependencies 解析）。删 symlink 会挂本地测试；从 dependencies 挪走会挂正式安装。
 - **设置是双层的**：用户层（开关 + 文案模板）走 `settings.register('dsh-pwa-notify', SettingsSchema)`，`scope.watch` 热更新 `apply` 里的 `cfg`；行配置只提供静态项（grace/debounce/subject/push/tool）和 `turnEndPush`/`includeSummary` 的 base 初始值。`renderTexts` 是纯函数，`decideNotification` 和 `/test` 预览共用——改文案逻辑必须同时过两边的测试。
 - **index.html 改写走 tapIndex，注入走 index-inject**：viewport meta / manifest link 这类要**编辑既有标签**的改动只能用 `webServer.tapIndex`（结构化注入行只会追加）；tapIndex 在注入之后运行，`stripExistingManifestLink` 必须保留自己的 `/_dsh/pwa-notify/manifest.json`（先注入=第一个=被浏览器采用）。安全区 CSS 打在 `body` 上且必须 `box-sizing:border-box`——app 是 `html,body,#root{height:100%}` 无全局 border-box，content-box padding 会多出一条可滚动溢出条；slot 包装层是 display:contents，padding 无效（zen-remote 实测）。CSS 全部包在 `@media (display-mode: standalone)` 里，桌面/标签页逐像素不变。
-- **图标是生成物**：改 `scripts/gen-icons.mjs` 后跑 `npm run icons` 并提交 `pwa/icons/`。PNG 编码器手写在脚本里（CRC32 + zlib），别引入 sharp 之类的依赖。
+- **图标是生成物（DSH 鲸鱼）**：`pwa/icons/whale.svg` 是从 `@deepseek-ai/dsh-web-frontend` 的 favicon vendor 进来的单 path 鲸鱼（DSH 品牌资产）；`npm run icons` 用**宿主安装里的 sharp**（绝对路径加载，仅生成期，不是包依赖）把「渐变圆角块 + 鲸鱼」整图栅格化。宿主 sharp 不在时回退到零依赖的手绘铃铛（手写 PNG 编码器 CRC32 + zlib）。**不要**把 sharp 写进 dependencies；换图改 whale.svg 或排版参数后重跑并提交三个 PNG。
 
 ## 3. 加载与工作机制
 

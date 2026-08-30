@@ -120,7 +120,7 @@ npm test          # node:test：通知策略 / 环形缓冲 / 路由 / RFC 8291 
 npm run icons     # 重新生成 pwa/icons/*.png（零依赖 PNG 编码器 + 铃铛绘制）
 ```
 
-改 `src/` 直接生效（无构建）；改 `scripts/gen-icons.mjs` 后跑 `npm run icons`。结构：`src/index.js` host 半边（路由 + 事件 + 工具 + 推送编排），`src/webpush.js` Web Push 协议（VAPID / aes128gcm / 订阅状态），`src/client.js` 浏览器半边（SW 注册 + 授权卡片 + 订阅 + 轮询），`pwa/` 静态资产。详见 [AGENTS.md](./AGENTS.md)。
+改 `src/` 后按「安装模型」一节重新打包安装；换图标改 `pwa/icons/whale.svg`（或 `scripts/gen-icons.mjs` 的排版参数）后跑 `npm run icons` 并重新打包。结构：`src/index.js` host 半边（路由 + 事件 + 工具 + 推送编排），`src/webpush.js` Web Push 协议（VAPID / aes128gcm / 订阅状态），`src/client.js` 浏览器半边（SW 注册 + 授权卡片 + 订阅 + 轮询），`pwa/` 静态资产。详见 [AGENTS.md](./AGENTS.md)。
 
 ## License
 
