@@ -475,29 +475,21 @@ export function handleVapid(pushState, req, res) {
 }
 
 // ---------------------------------------------------------------------------
-// Raw index.html transforms (webServer.tapIndex): the escape hatch for the
-// viewport meta and manifest link, which no structured injection row can
-// EDIT (rows only append). Lessons ported from zen-remote's gateway:
-//   - env(safe-area-inset-*) stays 0 until the viewport meta carries
-//     viewport-fit=cover, and patching it client-side is too late for the
-//     cold-start frame — it must be in the HTML itself;
-//   - a document honors the FIRST rel=manifest link; the app ships its own
-//     generic /manifest.webmanifest (display:fullscreen), so ours must be
-//     the only one to govern installs deterministically.
+// Raw index.html transform (webServer.tapIndex): the escape hatch for the
+// manifest link, which no structured injection row can EDIT (rows only
+// append). A document honors the FIRST rel=manifest link; the app ships its
+// own generic /manifest.webmanifest (display:fullscreen), so ours must be
+// the only one to govern installs deterministically (zen-remote's lesson).
+//
+// History: v0.5.0 also rewrote the viewport meta to viewport-fit=cover, set
+// apple-mobile-web-app-status-bar-style=black-translucent, and padded body
+// with env(safe-area-inset-*) to compensate. On a real iPhone the whole UI
+// sat UNDER the status bar ("界面整体上移"): position:fixed app chrome ignores
+// body padding entirely, and iOS evaluates env() as 0 on the cold-start
+// frame. The edge-to-edge experiment is REVERTED — the stock letterboxed
+// layout (system bars over opaque strips) is what "normal" means, and the
+// remaining SAFE_AREA_CSS below carries only rules with no layout impact.
 // ---------------------------------------------------------------------------
-
-const VIEWPORT_META = '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">'
-const STATUS_BAR_META = '<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">'
-
-/** Ensure the viewport meta carries viewport-fit=cover (replace or insert). */
-export function coverViewport(html) {
-  const re = /<meta\b[^>]*\bname\s*=\s*["']?viewport["']?[^>]*>/i
-  if (re.test(html)) return html.replace(re, VIEWPORT_META)
-  const headOpen = html.search(/<head[^>]*>/i)
-  if (headOpen < 0) return html
-  const at = html.indexOf('>', headOpen) + 1
-  return html.slice(0, at) + VIEWPORT_META + html.slice(at)
-}
 
 /** Drop manifest links other than this plugin's (ours renders FIRST via the
  * structured injection, which runs before tapIndex — so it must survive). */
@@ -507,36 +499,20 @@ export function stripExistingManifestLink(html) {
   )
 }
 
-/** iOS standalone status bar: translucent over the app background (needs the
- * viewport-fit=cover above; the safe-area CSS pads content below it). */
-export function addStatusBarMeta(html) {
-  if (/apple-mobile-web-app-status-bar-style/i.test(html)) return html
-  return html.replace(VIEWPORT_META, VIEWPORT_META + STATUS_BAR_META)
-}
-
 /** All index.html shims in one pass (registered via webServer.tapIndex). */
 export function adaptIndexHtml(html) {
-  return addStatusBarMeta(stripExistingManifestLink(coverViewport(html)))
+  return stripExistingManifestLink(html)
 }
 
-// Safe-area shell CSS for the installed PWA. Scoped to display-mode:
-// standalone so desktop and browser tabs are pixel-identical to stock.
-// The app is html,body,#root{height:100%} WITHOUT a global border-box, so
-// body padding must switch to border-box or it adds a scrollable strip
-// (content-box padding + height:100% overflows). Slot wrappers are
-// display:contents — padding there is discarded (zen-remote measured it) —
-// so body is the reliable whole-frame box.
-const SAFE_AREA_CSS = `/* dsh-pwa-notify · installed-PWA iOS shell adaptation */
+// PWA-only shell tweaks with ZERO layout impact (unlike the reverted
+// safe-area padding above): stop the browser's pull-to-refresh gesture from
+// reloading the app mid-conversation, and keep iOS from zooming the page
+// when a sub-16px input (the composer) gets focus.
+const SAFE_AREA_CSS = `/* dsh-pwa-notify · installed-PWA shell tweaks (no layout impact) */
 @media (display-mode: standalone) {
-  html {
-    scroll-padding-bottom: max(env(safe-area-inset-bottom), 0px);
-  }
   body {
-    box-sizing: border-box;
-    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left) !important;
     overscroll-behavior-y: none;
   }
-  /* iOS zooms the whole page when a focused input's font is <16px. */
   [data-slot="conversation"] input,
   [data-slot="conversation"] textarea {
     font-size: max(16px, 1em);
