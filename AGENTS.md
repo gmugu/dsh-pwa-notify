@@ -2,17 +2,22 @@
 
 > 面向 AI 编程助手 / 维护者的文档。人类读者看 [README.md](./README.md)。
 
+## 0. 协作规则（最高优先级）
+
+- **git 提交必须等用户确认**：改完代码/文档先跑测试、给出变更摘要，用户明确点头后才执行 `git commit`；禁止顺手提交。
+- **push 永远由用户执行**：本机没有 GitHub 凭据，且推送时机由用户决定。
+
 ## 1. 这是什么
 
 `dsh-pwa-notify` 是 DSH 的一个 **bundle 插件**（一个包，两半代码，对用户是一个插件）：
 
 - **host 半边** `src/index.js`（插件行 `dsh-pwa-notify`）：PWA 静态文件路由、`session/event` / `agent/turn-stopping` 监听、通知决策（纯函数）+ Web Push 广播、`notify_user` 模型工具、`webserver/index-inject` 注入 manifest link 与 VAPID 公钥。
 - **协议半边** `src/webpush.js`：VAPID 密钥（RFC 8292 ES256）、aes128gcm 载荷加密（RFC 8291）、订阅状态持久化与广播（404/410 自动清理）。
-- **浏览器半边** `src/client.js`（同一插件行，经 `dsh.client` 发现）：Service Worker 注册、通知授权卡片、推送订阅与回访 resync——页面自身无展示路径。
+- **浏览器半边** `src/client.js`（同一插件行，经 `dsh.client` 发现）：Service Worker 注册、通知授权卡片、推送订阅与回访 resync（通知展示全在 SW，页面自身无展示路径），以及 Settings「通知推送」卡片（React，settings.section 槽 + settingsScope）。
 
 ## 2. 硬约束（改动前必读）
 
-- **无构建、无依赖**：两个参考插件里，本插件走的是 dsh-mobile-hanui 的纯 JS 路线。不要引入 TypeScript / 打包器 / npm 依赖（连 `defineTool` 都是手工内联等价物——它只是 schema 包装器；Web Push 也是 node:crypto 手写，见下）。
+- **无构建、依赖极简**：走 dsh-mobile-hanui 的纯 JS 路线——不引入 TypeScript / 打包器 / 运行时依赖（`defineTool` 是手工内联等价物，Web Push 用 node:crypto 手写）；唯一例外是 settings schema 必需的 `@deepseek-ai/schemastery`（见下条）。新增依赖前先问：能不能 node: 内置解决。
 - **RFC 8291 已知答案向量是加密代码的唯一护栏**：`src/webpush.js` 的 `encryptPayload` 改任何一行（HKDF 接线、点编码、GCM 用法、header 布局），`test/webpush.test.mjs` 的 Appendix A 向量必须仍然逐字节通过。没有它，手写加密错了只会在真手机上静默失败。
 - **VAPID 密钥必须持久化**：`$DSH_HOME/pwa-notify-state.json` 里的密钥对一旦重新生成，所有已订阅设备全部失效。状态文件原子写（tmp+rename），`createPushState` 的状态是每实例闭包——**不要**用共享默认对象浅拷贝初始化（曾因此让一个实例的订阅漏进下一个实例）。
 - **推送是唯一通知通道**（用户决定移除轮询兜底）：事件腿统一走 `apply` 里的 `emit()`（fire-and-forget 广播）；`notify_user` 工具与 `/test` 直接 `await pushState.broadcast()` 拿真实 2xx 送达数。不要 reintroduce 缓冲/轮询通道——一条推送失败即丢失是**已接受的取舍**，设备下次打开应用时自动重订阅自愈。
@@ -22,7 +27,7 @@
 - **工具名是 `notify_user` 不是 `push_notify`**：刻意与 dsh-zen-remote 区分（避免同装冲突）。注册包 try/catch：与部署里同名工具撞名时降级为告警，不许把插件行带崩。
 - **schemastery 是正式 dependencies**：开发目录跑一次 `npm install` 装真实副本（registry 可达），打包安装的副本由 profile 解析同一依赖。**不要**手工往 node_modules 里放 symlink 代替安装——`npm pack`/npm 脚本加载依赖树时会按 package.json 收敛 node_modules，手工 symlink 会被清掉（踩过：symlink 蒸发 → 测试全挂 ERR_MODULE_NOT_FOUND）。
 - **设置是双层的**：用户层（开关 + 文案模板）走 `settings.register('dsh-pwa-notify', SettingsSchema)`，`scope.watch` 热更新 `apply` 里的 `cfg`；行配置只提供静态项（grace/debounce/subject/push/tool）和 `turnEndPush`/`includeSummary` 的 base 初始值。`renderTexts` 是纯函数，`decideNotification` 和 `/test` 预览共用——改文案逻辑必须同时过两边的测试。
-- **index.html 改写走 tapIndex，注入走 index-inject**：viewport meta / manifest link 这类要**编辑既有标签**的改动只能用 `webServer.tapIndex`（结构化注入行只会追加）；tapIndex 在注入之后运行，`stripExistingManifestLink` 必须保留自己的 `/_dsh/pwa-notify/manifest.json`（先注入=第一个=被浏览器采用）。安全区 CSS 打在 `body` 上且必须 `box-sizing:border-box`——app 是 `html,body,#root{height:100%}` 无全局 border-box，content-box padding 会多出一条可滚动溢出条；slot 包装层是 display:contents，padding 无效（zen-remote 实测）。CSS 全部包在 `@media (display-mode: standalone)` 里，桌面/标签页逐像素不变。
+- **index.html 改写走 tapIndex，注入走 index-inject**：要**编辑既有标签**的改动只能用 `webServer.tapIndex`（结构化注入行只会追加）；tapIndex 在注入之后运行，`stripExistingManifestLink` 必须保留自己的 `/_dsh/pwa-notify/manifest.json`（先注入=第一个=被浏览器采用）。**不要**再尝试 viewport-fit=cover / 安全区 padding 的全屏沉浸方案——v0.5.0 做过、v0.6.2 整体回退：fixed 定位的应用骨架不吃 body padding，iOS 首帧 env() 仍是 0，实测整个 UI 顶到状态栏底下。保留的 shell CSS 只有无布局影响的两条（overscroll 防误刷新、输入框 ≥16px 防聚焦缩放），包在 `@media (display-mode: standalone)` 里。
 - **图标是生成物（DSH 鲸鱼）**：`pwa/icons/whale.svg` 是从 `@deepseek-ai/dsh-web-frontend` 的 favicon vendor 进来的单 path 鲸鱼（DSH 品牌资产）；`npm run icons` 用**宿主安装里的 sharp**（绝对路径加载，仅生成期，不是包依赖）把「渐变圆角块 + 鲸鱼」整图栅格化。宿主 sharp 不在时回退到零依赖的手绘铃铛（手写 PNG 编码器 CRC32 + zlib）。**不要**把 sharp 写进 dependencies；换图改 whale.svg 或排版参数后重跑并提交全部 PNG。
 - **iOS 主屏图标只认 apple-touch-icon**：manifest icons 只服务 Android/桌面 Chrome；Safari 装主屏时读 `<link rel="apple-touch-icon">`（我们注入 180 全方形 PNG，**不能自带圆角/透明**——iOS 自己切圆角，预切会露黑角），没有这个标签就退化为页面截图。且 iOS 在**安装时刻**缓存图标：换图后必须删掉主屏图标重加才生效。
 
@@ -45,7 +50,7 @@
 ## 4. 命令
 
 ```sh
-npm test        # node --test：21 个用例（策略、开关、文案模板、路由、index 改写、RFC 8291 向量、VAPID JWT、推送广播）
+npm test        # node --test：20 个用例（策略、开关、文案模板、路由、index 改写、RFC 8291 向量、VAPID JWT、推送广播）
 npm run icons   # 重新生成 pwa/icons/*.png
 ```
 
@@ -67,4 +72,7 @@ npm run icons   # 重新生成 pwa/icons/*.png
 
 ## 7. 发布
 
-`npm version patch`（不要 `--no-git-tag-version`，`github:` 安装 spec 依赖 tag）→ `git push --tags` → `npm publish --access public`。
+- 仓库：https://github.com/gmugu/dsh-pwa-notify（`git push origin main && git push --tags`）。
+- GitHub 安装 spec 依赖 tag 存在：每次发版 `npm version patch`（不要 `--no-git-tag-version`）→ push main + tags。
+- tarball 分发：`npm pack` 出的 tgz 直接发人，`dsh plugin --profile web add ./xxx.tgz` 安装。
+- npm 发布（如需）：tag push 后 `npm publish --access public`（prepublishOnly 自动跑测试）。

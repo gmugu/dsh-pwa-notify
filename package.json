@@ -57,5 +57,13 @@
     "README.md",
     "AGENTS.md",
     "LICENSE"
-  ]
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gmugu/dsh-pwa-notify.git"
+  },
+  "homepage": "https://github.com/gmugu/dsh-pwa-notify#readme",
+  "bugs": {
+    "url": "https://github.com/gmugu/dsh-pwa-notify/issues"
+  }
 }
