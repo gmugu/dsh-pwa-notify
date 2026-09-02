@@ -87,6 +87,9 @@ export const PUSH_POLICY = {
   approval: { ttl: 900, urgency: 'high' },
   question: { ttl: 900, urgency: 'high' },
   'turn-end': { ttl: 900, urgency: 'normal' },
+  error: { ttl: 900, urgency: 'high' },
+  goal: { ttl: 900, urgency: 'high' },
+  job: { ttl: 900, urgency: 'normal' },
   model: { ttl: 900, urgency: 'high' },
   test: { ttl: 60, urgency: 'normal' },
 }
@@ -106,6 +109,12 @@ export const SettingsSchema = z.object({
   questionPush: z.boolean().default(true),
   /** Notify on ordinary turn end. */
   turnEndPush: z.boolean().default(false),
+  /** Notify when a turn errors out (agent/error, top-level sessions). */
+  errorPush: z.boolean().default(true),
+  /** Notify when a goal is marked blocked (update_goal action=blocked). */
+  goalPush: z.boolean().default(true),
+  /** Notify when a background job settles completed/failed (jobs.onJobDone). */
+  jobPush: z.boolean().default(true),
   /** Fill {question}/{summary} template variables with conversation text. */
   includeSummary: z.boolean().default(false),
   textApprovalTitle: z.string().default(''),
@@ -114,6 +123,12 @@ export const SettingsSchema = z.object({
   textQuestionBody: z.string().default(''),
   textTurnTitle: z.string().default(''),
   textTurnBody: z.string().default(''),
+  textErrorTitle: z.string().default(''),
+  textErrorBody: z.string().default(''),
+  textGoalTitle: z.string().default(''),
+  textGoalBody: z.string().default(''),
+  textJobTitle: z.string().default(''),
+  textJobBody: z.string().default(''),
 })
 
 /** Body cap for the POST /test payload. */
@@ -123,6 +138,13 @@ const TEST_BODY_MAX = 4096
  * session event is appended BEFORE dispatch and the call then blocks until a
  * human answers — the call event IS the "a question is pending" signal. */
 const ASK_USER_TOOL = 'ask_user_question'
+/** Plan review: blocks in the SAME userQuestions.ask() channel as
+ * ASK_USER_TOOL (dsh-plan-mode), so its tool/call event is detectable the
+ * same way — before dispatch, while the session waits on the human. */
+const EXIT_PLAN_TOOL = 'exit_plan_mode'
+/** Goal tool: a `blocked` action report means the run cannot proceed without
+ * the user (update_goal schema: blockedReason {code, message}). */
+const GOAL_TOOL = 'update_goal'
 
 const SUMMARY_MAX = 120
 const clip = (s) => String(s).replace(/\s+/g, ' ').trim().slice(0, SUMMARY_MAX)
@@ -179,6 +201,39 @@ export function pendingQuestionText(rawArguments) {
   }
 }
 
+/** Plan excerpt of an exit_plan_mode call ({ plan }). Best-effort. */
+export function planExcerpt(rawArguments) {
+  try {
+    const plan = JSON.parse(String(rawArguments)).plan
+    return typeof plan === 'string' ? clip(plan) : ''
+  } catch {
+    return ''
+  }
+}
+
+/** blockedReason of an update_goal call when (and only when) the action is
+ * `blocked`. Schema key is blockedReason; blocked_reason accepted defensively. */
+export function goalBlockedReason(rawArguments) {
+  try {
+    const args = JSON.parse(String(rawArguments))
+    if (args.action !== 'blocked') return null
+    const reason = args.blockedReason ?? args.blocked_reason
+    if (reason === null || typeof reason !== 'object') return ''
+    const parts = [reason.code, reason.message].filter((x) => typeof x === 'string' && x !== '')
+    return clip(parts.join('：'))
+  } catch {
+    return null
+  }
+}
+
+/** Model-safe message of an agent/error payload's `error: unknown`. */
+export function errorMessage(error) {
+  if (error instanceof Error) return clip(error.message || error.name)
+  if (typeof error === 'string') return clip(error)
+  if (error && typeof error === 'object' && typeof error.message === 'string') return clip(error.message)
+  return error === undefined || error === null ? '' : clip(String(error))
+}
+
 const skip = (reason) => ({ shouldNotify: false, title: '', body: '', reason })
 
 // --- notification texts: defaults + user-override templates ------------------
@@ -197,6 +252,12 @@ export const DEFAULT_TEXTS = {
   questionBody: '{question}',
   turnTitle: 'DSH 任务完成',
   turnBody: '{summary}',
+  errorTitle: 'DSH 任务出错',
+  errorBody: '{error}',
+  goalTitle: 'DSH 目标受阻',
+  goalBody: '{reason}',
+  jobTitle: 'DSH 后台任务结束',
+  jobBody: '{label}（{status}）',
 }
 
 /** Replace `{token}` references; unknown/empty variables render empty. */
@@ -222,10 +283,16 @@ export function renderTexts(kind, input, cfg) {
     const custom = t[key]
     return typeof custom === 'string' && custom.trim() !== '' ? custom : DEFAULT_TEXTS[key]
   }
+  // {question}/{summary} are conversation content and honor includeSummary;
+  // {error}/{reason}/{label}/{status} are diagnostics/metadata — never gated.
   const vars = {
     tool: input.toolName || '',
     question: cfg && cfg.includeSummary ? input.question || '' : '',
     summary: cfg && cfg.includeSummary ? input.summary || '' : '',
+    error: input.error || '',
+    reason: input.reason || '',
+    label: input.label || '',
+    status: input.status || '',
   }
   let title
   let body
@@ -234,7 +301,20 @@ export function renderTexts(kind, input, cfg) {
     body = renderTemplate(input.toolName ? pick('approvalBody') : '有操作需要授权才能继续', vars)
   } else if (kind === 'question') {
     title = renderTemplate(pick('questionTitle'), vars)
-    body = vars.question !== '' ? renderTemplate(pick('questionBody'), vars) : '智能体提了一个问题，正在等你回答'
+    body = vars.question !== ''
+      ? renderTemplate(pick('questionBody'), vars)
+      : input.plan
+        ? '智能体提交了一份计划，等你审阅'
+        : '智能体提了一个问题，正在等你回答'
+  } else if (kind === 'error') {
+    title = renderTemplate(pick('errorTitle'), vars)
+    body = vars.error !== '' ? renderTemplate(pick('errorBody'), vars) : '回合执行失败，需要你处理'
+  } else if (kind === 'goal') {
+    title = renderTemplate(pick('goalTitle'), vars)
+    body = vars.reason !== '' ? renderTemplate(pick('goalBody'), vars) : '目标连续多轮无法推进，需要你介入'
+  } else if (kind === 'job') {
+    title = renderTemplate(pick('jobTitle'), vars)
+    body = renderTemplate(pick('jobBody'), vars)
   } else {
     title = renderTemplate(pick('turnTitle'), vars)
     body = vars.summary !== '' ? renderTemplate(pick('turnBody'), vars) : '智能体已完成当前回合'
@@ -273,6 +353,30 @@ export function decideNotification(input, cfg) {
       if (cfg.questionEnabled === false) return skip('question-disabled')
       const texts = renderTexts('question', input, cfg)
       return { shouldNotify: true, title: texts.title, body: texts.body, reason: 'question-pending' }
+    }
+
+    // Task failure (agent/error): a turn produced nothing — retry/model
+    // swap/intervention is the user's call. Exempt from the debounce like
+    // the other needs-you legs; the per-turn tag collapses retry bursts.
+    case 'error': {
+      if (cfg.errorEnabled === false) return skip('error-disabled')
+      const texts = renderTexts('error', input, cfg)
+      return { shouldNotify: true, title: texts.title, body: texts.body, reason: 'agent-error' }
+    }
+    // Goal blocked (update_goal action=blocked): the explicit
+    // cannot-proceed-without-you state.
+    case 'goal': {
+      if (cfg.goalEnabled === false) return skip('goal-disabled')
+      const texts = renderTexts('goal', input, cfg)
+      return { shouldNotify: true, title: texts.title, body: texts.body, reason: 'goal-blocked' }
+    }
+    // Background job settled (jobs.onJobDone, completed/failed). Nice-to-
+    // know family: subject to the debounce like turn-end.
+    case 'job': {
+      if (cfg.jobEnabled === false) return skip('job-disabled')
+      if (debounced) return skip('debounced')
+      const texts = renderTexts('job', input, cfg)
+      return { shouldNotify: true, title: texts.title, body: texts.body, reason: 'job-done' }
     }
 
     // Turn end. Opt-in, top-level only, debounced.
@@ -355,6 +459,9 @@ export const TEST_SAMPLES = {
   approval: { toolName: 'bash（示例）' },
   question: { question: '示例问题：这两个方案你倾向哪个？' },
   'turn-end': { summary: '示例摘要：已修复通知卡片样式并提交（fix: notify-card）' },
+  error: { error: '示例错误：模型 API 返回 429（rate limit）' },
+  goal: { reason: '示例：构建服务器连续 3 轮无法连接' },
+  job: { label: 'pnpm build', status: 'completed' },
 }
 
 /** POST {BASE}/test {kind?, title?, body?} — the test buttons.
@@ -744,6 +851,9 @@ export function apply(ctx, config = {}) {
     approvalEnabled: true,
     questionEnabled: true,
     turnEndEnabled: config.turnEnd === true,
+    errorEnabled: true,
+    goalEnabled: true,
+    jobEnabled: true,
     approvalGraceMs: num('approvalGraceMs'),
     debounceMs: num('debounceMs'),
     includeSummary: config.includeSummary === true,
@@ -765,6 +875,9 @@ export function apply(ctx, config = {}) {
       cfg.approvalEnabled = value.approvalPush !== false
       cfg.questionEnabled = value.questionPush !== false
       cfg.turnEndEnabled = value.turnEndPush === true
+      cfg.errorEnabled = value.errorPush !== false
+      cfg.goalEnabled = value.goalPush !== false
+      cfg.jobEnabled = value.jobPush !== false
       cfg.includeSummary = value.includeSummary === true
       cfg.texts = {
         approvalTitle: value.textApprovalTitle,
@@ -773,6 +886,12 @@ export function apply(ctx, config = {}) {
         questionBody: value.textQuestionBody,
         turnTitle: value.textTurnTitle,
         turnBody: value.textTurnBody,
+        errorTitle: value.textErrorTitle,
+        errorBody: value.textErrorBody,
+        goalTitle: value.textGoalTitle,
+        goalBody: value.textGoalBody,
+        jobTitle: value.textJobTitle,
+        jobBody: value.textJobBody,
       }
     }
     applyLive()
@@ -847,13 +966,57 @@ export function apply(ctx, config = {}) {
           clearTimeout(timer)
           armed.delete(event.data.id)
         }
-      } else if (event.type === 'tool/call' && event.data.name === ASK_USER_TOOL) {
-        fire({ kind: 'question', question: pendingQuestionText(event.data.arguments) })
+      } else if (event.type === 'tool/call' && (event.data.name === ASK_USER_TOOL || event.data.name === EXIT_PLAN_TOOL)) {
+        // Same wait channel (userQuestions.ask): the question leg covers
+        // ask_user_question AND plan review — both block the session on a
+        // human before the call's result exists.
+        const isPlan = event.data.name === EXIT_PLAN_TOOL
+        fire({
+          kind: 'question',
+          question: isPlan ? planExcerpt(event.data.arguments) : pendingQuestionText(event.data.arguments),
+          plan: isPlan,
+        })
+      } else if (event.type === 'tool/call' && event.data.name === GOAL_TOOL) {
+        // `blocked` is the explicit needs-you state; other update_goal
+        // actions (complete/edit/...) are routine and stay quiet.
+        const reason = goalBlockedReason(event.data.arguments)
+        if (reason !== null) fire({ kind: 'goal', reason })
       }
     })
   } catch (e) {
     console.warn(`[dsh-pwa-notify] cannot listen on "session/event": ${String((e && e.message) || e)}`)
   }
+
+  // --- Task failure leg (agent/error) --------------------------------------
+  // A turn that errored produced nothing; retry/model-swap/intervention is
+  // the user's call. Top-level only: a subagent's failure surfaces to its
+  // parent as a tool result the parent handles. Same missing-header rule as
+  // turn-end: cannot attribute -> stay quiet.
+  try {
+    ctx.on('agent/error', (payload) => {
+      const session = payload && payload.agent && payload.agent.session
+      const header = session && session.header
+      if (!header || (header.delegationDepth ?? 0) !== 0) return
+      fire({ kind: 'error', error: errorMessage(payload.error) })
+    })
+  } catch (e) {
+    console.warn(`[dsh-pwa-notify] cannot listen on "agent/error": ${String((e && e.message) || e)}`)
+  }
+
+  // --- Background job settlement leg ----------------------------------------
+  // jobs.onJobDone fires per settlement; we push completed/failed only —
+  // `killed` is user-initiated (they know) and `running` is not a settlement.
+  ctx.inject(['jobs'], (jobsCtx) => {
+    jobsCtx.effect(
+      () =>
+        jobsCtx.jobs.onJobDone((snapshot) => {
+          if (!snapshot) return
+          if (snapshot.status !== 'completed' && snapshot.status !== 'failed') return
+          fire({ kind: 'job', label: snapshot.label || snapshot.id || '任务', status: snapshot.status })
+        }),
+      'dsh-pwa-notify: job settlement',
+    )
+  })
 
   // --- Turn-end leg (opt-in) ----------------------------------------------
   try {

@@ -11,7 +11,7 @@
 
 `dsh-pwa-notify` 是 DSH 的一个 **bundle 插件**（一个包，两半代码，对用户是一个插件）：
 
-- **host 半边** `src/index.js`（插件行 `dsh-pwa-notify`）：PWA 静态文件路由、`session/event` / `agent/turn-stopping` 监听、通知决策（纯函数）+ Web Push 广播、`notify_user` 模型工具、`webserver/index-inject` 注入 manifest link 与 VAPID 公钥。
+- **host 半边** `src/index.js`（插件行 `dsh-pwa-notify`）：PWA 静态文件路由、事件监听（`session/event` 的授权/提问/计划/目标 + `agent/turn-stopping` + `agent/error` + `jobs.onJobDone`）、通知决策（纯函数）+ Web Push 广播、`notify_user` 模型工具、settings 命名空间、`webserver/index-inject` 注入与 tapIndex 改写。
 - **协议半边** `src/webpush.js`：VAPID 密钥（RFC 8292 ES256）、aes128gcm 载荷加密（RFC 8291）、订阅状态持久化与广播（404/410 自动清理）。
 - **浏览器半边** `src/client.js`（同一插件行，经 `dsh.client` 发现）：Service Worker 注册、通知授权卡片、推送订阅与回访 resync（通知展示全在 SW，页面自身无展示路径），以及 Settings「通知推送」卡片（React，settings.section 槽 + settingsScope）。
 
@@ -22,7 +22,8 @@
 - **VAPID 密钥必须持久化**：`$DSH_HOME/pwa-notify-state.json` 里的密钥对一旦重新生成，所有已订阅设备全部失效。状态文件原子写（tmp+rename），`createPushState` 的状态是每实例闭包——**不要**用共享默认对象浅拷贝初始化（曾因此让一个实例的订阅漏进下一个实例）。
 - **推送是唯一通知通道**（用户决定移除轮询兜底）：事件腿统一走 `apply` 里的 `emit()`（fire-and-forget 广播）；`notify_user` 工具与 `/test` 直接 `await pushState.broadcast()` 拿真实 2xx 送达数。不要 reintroduce 缓冲/轮询通道——一条推送失败即丢失是**已接受的取舍**，设备下次打开应用时自动重订阅自愈。
 - **SW 永远不加 fetch handler**：DSH 的 JS/CSS 每次部署都变且文件名不变，任何缓存策略都会造成「新 DOM + 旧 CSS」（dsh-zen-remote sw v2→v3 的事故复盘）。本插件的 SW 只做通知展示（push 事件 + showNotification）和点击聚焦。
-- **通知策略保持「需要你才响」**：等授权 / 等回答默认开且不受 debounce 压制（设置卡片可关——用户明确要求的开关）；回合结束默认关、子代理永远不推。默认语义来自 dsh-zen-remote 的行为变更历史（1.0.3 起回合结束默认不推），不要「顺手改默认值」。
+- **通知策略保持「需要你才响」**：**免防打扰压制**的腿 = 等授权 / 等回答（**含计划审阅**，exit_plan_mode 与 ask_user_question 共用 userQuestions.ask() 阻塞通道，按 tool/call 名字白名单识别）/ 回合出错（agent/error，仅顶层会话）/ 目标受阻（update_goal action=blocked）；**受压制**的腿 = 回合结束（默认关）与后台任务结算（默认开）。设置卡片可关各腿。子代理的完成/出错永远不推。默认语义源自 dsh-zen-remote（1.0.3 起回合结束默认不推），不要「顺手改默认值」。
+- **等待类工具按名字白名单识别**：`ASK_USER_TOOL` / `EXIT_PLAN_TOOL`（再加 GOAL_TOOL 的 blocked 动作）。userQuestions 服务本身没有事件面（只有 ask() API），全 DSH 的 asker 只有这两个——**上游新增等待类工具时必须扩这个名单**，否则静默漏通知。
 - **决策层必须是纯函数**：`decideNotification` / `turnSummary` / `assistantText` / `pendingQuestionText` 全部纯函数导出，测试不经真实会话（建真实会话耗 token，是工作区硬约束）。宿主侧接线（`apply`）只做薄封装。
 - **工具名是 `notify_user` 不是 `push_notify`**：刻意与 dsh-zen-remote 区分（避免同装冲突）。注册包 try/catch：与部署里同名工具撞名时降级为告警，不许把插件行带崩。
 - **schemastery 是正式 dependencies**：开发目录跑一次 `npm install` 装真实副本（registry 可达），打包安装的副本由 profile 解析同一依赖。**不要**手工往 node_modules 里放 symlink 代替安装——`npm pack`/npm 脚本加载依赖树时会按 package.json 收敛 node_modules，手工 symlink 会被清掉（踩过：symlink 蒸发 → 测试全挂 ERR_MODULE_NOT_FOUND）。
@@ -50,7 +51,7 @@
 ## 4. 命令
 
 ```sh
-npm test        # node --test：20 个用例（策略、开关、文案模板、路由、index 改写、RFC 8291 向量、VAPID JWT、推送广播）
+npm test        # node --test：25 个用例（策略、开关、文案模板、路由、index 改写、RFC 8291 向量、VAPID JWT、推送广播）
 npm run icons   # 重新生成 pwa/icons/*.png
 ```
 

@@ -17,6 +17,9 @@ import {
   renderTexts,
   DEFAULT_TEXTS,
   TEST_SAMPLES,
+  planExcerpt,
+  goalBlockedReason,
+  errorMessage,
   assistantText,
   turnSummary,
   pendingQuestionText,
@@ -114,6 +117,66 @@ test('sameOriginPost port: origin/host match, mismatch, and sec-fetch fallback',
   assert.equal(sameOriginPost({ headers: { 'sec-fetch-site': 'cross-site' } }), false)
   assert.equal(sameOriginPost({ headers: { 'sec-fetch-site': 'same-origin' } }), true)
   assert.equal(sameOriginPost({ headers: {} }), false)
+})
+
+// --- new legs: plan / error / goal / job ---------------------------------------
+
+test('planExcerpt parses exit_plan_mode arguments', () => {
+  assert.equal(planExcerpt(JSON.stringify({ plan: '一步\n二步' })), '一步 二步')
+  assert.equal(planExcerpt('garbage'), '')
+  assert.equal(planExcerpt(JSON.stringify({})), '')
+})
+
+test('goalBlockedReason: null unless action=blocked, message otherwise', () => {
+  assert.equal(goalBlockedReason(JSON.stringify({ action: 'complete' })), null)
+  assert.equal(goalBlockedReason('not json'), null)
+  const r = goalBlockedReason(JSON.stringify({ action: 'blocked', blockedReason: { code: 'network', message: '连不上构建机' } }))
+  assert.equal(r, 'network：连不上构建机')
+  // defensive snake_case key
+  const r2 = goalBlockedReason(JSON.stringify({ action: 'blocked', blocked_reason: { code: 'c', message: 'm' } }))
+  assert.equal(r2, 'c：m')
+  assert.equal(goalBlockedReason(JSON.stringify({ action: 'blocked' })), '')
+})
+
+test('errorMessage extracts safe text from unknown error payloads', () => {
+  assert.equal(errorMessage(new Error('boom')), 'boom')
+  assert.equal(errorMessage('plain'), 'plain')
+  assert.equal(errorMessage({ message: 'obj' }), 'obj')
+  assert.equal(errorMessage(undefined), '')
+})
+
+test('decideNotification: error/goal exempt from debounce, job debounced; toggles', () => {
+  const base = { now: 10000, lastSent: 9999 }
+  assert.equal(decideNotification({ ...base, kind: 'error', error: 'x' }, CFG).shouldNotify, true)
+  assert.equal(decideNotification({ ...base, kind: 'goal', reason: 'x' }, CFG).shouldNotify, true)
+  assert.equal(decideNotification({ ...base, kind: 'job', label: 'b', status: 'completed' }, CFG).reason, 'debounced')
+  assert.equal(
+    decideNotification({ now: 60000, lastSent: 0, kind: 'job', label: 'b', status: 'completed' }, CFG).shouldNotify,
+    true,
+  )
+  assert.equal(decideNotification({ ...base, kind: 'error' }, { ...CFG, errorEnabled: false }).reason, 'error-disabled')
+  assert.equal(decideNotification({ ...base, kind: 'goal' }, { ...CFG, goalEnabled: false }).reason, 'goal-disabled')
+  assert.equal(decideNotification({ now: 60000, kind: 'job' }, { ...CFG, jobEnabled: false }).reason, 'job-disabled')
+})
+
+test('renderTexts: question leg distinguishes plan review; new kinds render vars ungated', () => {
+  // plan review fallback (summary off)
+  let t = renderTexts('question', { plan: true }, {})
+  assert.equal(t.body, '智能体提交了一份计划，等你审阅')
+  // plan review with summary on quotes the plan via {question}
+  t = renderTexts('question', { plan: true, question: '计划开头……' }, { includeSummary: true })
+  assert.equal(t.body, '计划开头……')
+  // error/goal/job vars are diagnostics: NOT gated by includeSummary
+  t = renderTexts('error', { error: '429' }, { includeSummary: false })
+  assert.equal(t.body, '429')
+  t = renderTexts('goal', { reason: '断网' }, { includeSummary: false })
+  assert.equal(t.body, '断网')
+  t = renderTexts('job', { label: 'build', status: 'completed' }, {})
+  assert.equal(t.body, 'build（completed）')
+  // custom template wins
+  t = renderTexts('error', { error: '429' }, { texts: { errorTitle: '崩了', errorBody: '原因 {error}' } })
+  assert.equal(t.title, '崩了')
+  assert.equal(t.body, '原因 429')
 })
 
 // --- texts + toggles ----------------------------------------------------------

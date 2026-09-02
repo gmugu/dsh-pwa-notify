@@ -421,16 +421,25 @@ window.__ModuleLoader__.load({
     var TEXT_FIELDS = [
       { key: 'textApprovalTitle', label: '授权 · 标题', ph: 'DSH 等你授权' },
       { key: 'textApprovalBody', label: '授权 · 内容', ph: '{tool} 需要授权才能继续' },
-      { key: 'textQuestionTitle', label: '提问 · 标题', ph: 'DSH 等你回答' },
-      { key: 'textQuestionBody', label: '提问 · 内容', ph: '{question}（关掉摘要时固定为提示语）' },
+      { key: 'textQuestionTitle', label: '提问 · 标题', ph: 'DSH 等你回答（含计划审阅）' },
+      { key: 'textQuestionBody', label: '提问 · 内容', ph: '{question}（计划审阅填计划开头；关掉摘要时固定为提示语）' },
       { key: 'textTurnTitle', label: '完成 · 标题', ph: 'DSH 任务完成' },
       { key: 'textTurnBody', label: '完成 · 内容', ph: '{summary}（关掉摘要时固定为提示语）' },
+      { key: 'textErrorTitle', label: '出错 · 标题', ph: 'DSH 任务出错' },
+      { key: 'textErrorBody', label: '出错 · 内容', ph: '{error}（诊断信息，不受摘要开关影响）' },
+      { key: 'textGoalTitle', label: '受阻 · 标题', ph: 'DSH 目标受阻' },
+      { key: 'textGoalBody', label: '受阻 · 内容', ph: '{reason}（不受摘要开关影响）' },
+      { key: 'textJobTitle', label: '任务结束 · 标题', ph: 'DSH 后台任务结束' },
+      { key: 'textJobBody', label: '任务结束 · 内容', ph: '{label}（{status}）' },
     ]
 
     var KIND_TESTS = [
       { kind: 'approval', label: '测试·授权' },
       { kind: 'question', label: '测试·提问' },
       { kind: 'turn-end', label: '测试·完成' },
+      { kind: 'error', label: '测试·出错' },
+      { kind: 'goal', label: '测试·受阻' },
+      { kind: 'job', label: '测试·任务' },
     ]
 
     function postTest(kind) {
@@ -542,6 +551,18 @@ window.__ModuleLoader__.load({
           h('label', { className: 'pwn-check' },
             h('input', { type: 'checkbox', checked: v && v.turnEndPush === true, onChange: function (e) { saveToggle('turnEndPush', e.target.checked) } }),
             '回合完成时推送'
+          ),
+          h('label', { className: 'pwn-check' },
+            h('input', { type: 'checkbox', checked: v && v.errorPush !== false, onChange: function (e) { saveToggle('errorPush', e.target.checked) } }),
+            '回合出错时推送（模型失败/限流等）'
+          ),
+          h('label', { className: 'pwn-check' },
+            h('input', { type: 'checkbox', checked: v && v.goalPush !== false, onChange: function (e) { saveToggle('goalPush', e.target.checked) } }),
+            '目标受阻时推送'
+          ),
+          h('label', { className: 'pwn-check' },
+            h('input', { type: 'checkbox', checked: v && v.jobPush !== false, onChange: function (e) { saveToggle('jobPush', e.target.checked) } }),
+            '后台任务结束时推送（完成/失败）'
           ),
           h('label', { className: 'pwn-check' },
             h('input', { type: 'checkbox', checked: v && v.includeSummary === true, onChange: function (e) { saveToggle('includeSummary', e.target.checked) } }),
