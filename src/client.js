@@ -111,6 +111,16 @@ window.__ModuleLoader__.load({
       return a
     }
 
+    /** Short client-derived hint for the management list, e.g.
+     * 「iPhone · 主屏」/「Mac · 浏览器」. Best-effort from the UA string. */
+    function deviceLabel() {
+      var ua = navigator.userAgent || ''
+      var device = /iPhone/.test(ua) ? 'iPhone' : /iPad/.test(ua) ? 'iPad' : /Macintosh/.test(ua) ? 'Mac' : /Android/.test(ua) ? 'Android' : /Windows/.test(ua) ? 'Windows' : '设备'
+      var m = /OS (\d+(?:_\d+)?)/.exec(ua)
+      var os = m ? ' iOS/macOS ' + m[1].replace('_', '.') : ''
+      return device + os + (isStandalone() ? ' · 主屏' : ' · 浏览器')
+    }
+
     async function subscribePush() {
       if (state.pushReady || !pushAllowedHere()) return false
       var key = vapidKeyBytes()
@@ -125,7 +135,7 @@ window.__ModuleLoader__.load({
         var res = await fetch(BASE + '/subscribe', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ subscription: sub.toJSON() }),
+          body: JSON.stringify({ subscription: sub.toJSON(), device: { label: deviceLabel() } }),
         })
         if (!res.ok) return false
         state.pushReady = true
@@ -476,12 +486,38 @@ window.__ModuleLoader__.load({
       var subs = subState[0]
       var setSubs = subState[1]
       var refreshSubs = function () {
-        fetch(BASE + '/vapid', { credentials: 'same-origin' })
+        fetch(BASE + '/devices', { credentials: 'same-origin' })
           .then(function (r) { return r.json() })
-          .then(function (d) { if (d && d.ok) setSubs(d.subscriptions) })
+          .then(function (d) { if (d && d.ok) setSubs(d.devices) })
           .catch(function () {})
       }
       react.useEffect(refreshSubs, [])
+
+      function removeDevice(endpoint) {
+        if (!window.confirm('删除这台设备的推送订阅？若该设备仍在使用，它下次打开应用会自动重新订阅。')) return
+        setMsg(null)
+        fetch(BASE + '/devices/remove', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ endpoint: endpoint }),
+        })
+          .then(function (r) { return r.json() })
+          .then(function (r) {
+            if (r.ok) {
+              setMsg({ kind: 'ok', text: r.removed ? '已删除该设备的订阅。' : '未找到该订阅（可能已删除）。' })
+              refreshSubs()
+            } else setMsg({ kind: 'err', text: '删除失败，请重试。' })
+          })
+          .catch(function () { setMsg({ kind: 'err', text: '删除失败，请重试。' }) })
+      }
+
+      function fmtTime(ts) {
+        if (ts === null || ts === undefined) return '—'
+        var d = new Date(ts)
+        var pad = function (n) { return (n < 10 ? '0' : '') + n }
+        return d.getMonth() + 1 + '/' + d.getDate() + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes())
+      }
 
       var ready = snap.status === 'ready'
       var v = ready && snap.value ? snap.value : null
@@ -601,9 +637,29 @@ window.__ModuleLoader__.load({
           h('p', { className: 'pwn-hint' }, '按当前文案模板 + 示例变量推一条真通知到已订阅设备，用于预览自定义效果。')
         ) : null,
         ready ? h('div', { className: 'pwn-field' },
-          h('label', { className: 'pwn-label' }, '订阅状态'),
+          h('label', { className: 'pwn-label' }, '订阅设备'),
+          subs === null
+            ? h('p', { className: 'pwn-hint' }, '读取中…')
+            : subs.length === 0
+              ? h('p', { className: 'pwn-hint' }, '还没有已订阅设备（页面或主屏 PWA 里开启过通知才会出现）。')
+              : subs.map(function (d) {
+                  return h('div', {
+                    key: d.endpoint,
+                    style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' },
+                  },
+                    h('span', { style: { fontSize: '13px', color: 'var(--dsw-alias-label-primary,#c2c8d0)' } }, d.label),
+                    h('span', { className: 'pwn-hint', style: { margin: 0 } },
+                      d.host + ' · 活跃 ' + fmtTime(d.updatedAt)),
+                    h('button', {
+                      type: 'button',
+                      className: 'pwn-btn-ghost',
+                      style: { padding: '2px 10px', fontSize: '12px' },
+                      onClick: function () { removeDevice(d.endpoint) },
+                    }, '删除'),
+                  )
+                }),
           h('p', { className: 'pwn-hint' },
-            subs === null ? '读取中…' : '已订阅设备：' + subs + ' 台（页面或主屏 PWA 里开启过通知的设备）。'
+            '「活跃」是该设备最近一次打开应用自动续订的时间——常用设备会一直刷新，废弃设备停在很久以前。删除是软操作：被删的设备若仍在用，下次打开会自动重新订阅；要彻底踢掉某台设备，请在那台设备上关闭通知权限或删除主屏 App。'
           ),
           h('div', { className: 'pwn-row' },
             h('button', { type: 'button', className: 'pwn-btn-ghost', onClick: refreshSubs }, '刷新')

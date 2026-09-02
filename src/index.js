@@ -535,13 +535,16 @@ export async function handleSubscribe(pushState, req, res) {
     return
   }
   let sub
+  let device
   try {
-    sub = JSON.parse(raw).subscription
+    const parsed = JSON.parse(raw)
+    sub = parsed.subscription
+    device = parsed.device
   } catch {
     sub = undefined
   }
   try {
-    const subscriptions = pushState.addSubscription(sub)
+    const subscriptions = pushState.addSubscription(sub, device || {})
     responseJson(res, 200, { ok: true, subscriptions })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
@@ -561,6 +564,38 @@ export async function handleUnsubscribe(pushState, req, res) {
     return
   }
   const raw = await readBody(req, SUB_BODY_MAX)
+  let endpoint = ''
+  try {
+    endpoint = String(JSON.parse(raw).endpoint || '')
+  } catch {
+    endpoint = ''
+  }
+  const removed = pushState.removeSubscription(endpoint)
+  responseJson(res, 200, { ok: true, removed })
+}
+
+/** GET {BASE}/devices — the management list (no crypto material). */
+export function handleDevices(pushState, req, res) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    res.setHeader('Allow', 'GET, HEAD')
+    responseJson(res, 405, { ok: false, error: { code: 'method-not-allowed', message: 'Use GET' } })
+    return
+  }
+  responseJson(res, 200, { ok: true, devices: pushState.listDevices() })
+}
+
+/** POST {BASE}/devices/remove {endpoint} — drop one subscription. */
+export async function handleDeviceRemove(pushState, req, res) {
+  if (req.method !== 'POST') {
+    res.setHeader('Allow', 'POST')
+    responseJson(res, 405, { ok: false, error: { code: 'method-not-allowed', message: 'Use POST' } })
+    return
+  }
+  if (!sameOriginPost(req)) {
+    responseJson(res, 403, { ok: false, error: { code: 'origin-rejected', message: 'The request must originate from this DSH Web application' } })
+    return
+  }
+  const raw = await readBody(req)
   let endpoint = ''
   try {
     endpoint = String(JSON.parse(raw).endpoint || '')
@@ -664,6 +699,8 @@ export async function handleRoute(pushState, getCfg, req, res) {
     if (rel === 'test') return await handleTest(pushState, getCfg, req, res)
     if (rel === 'subscribe') return await handleSubscribe(pushState, req, res)
     if (rel === 'unsubscribe') return await handleUnsubscribe(pushState, req, res)
+    if (rel === 'devices') return handleDevices(pushState, req, res)
+    if (rel === 'devices/remove') return await handleDeviceRemove(pushState, req, res)
     if (rel === 'vapid') return handleVapid(pushState, req, res)
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       res.setHeader('Allow', 'GET, HEAD')

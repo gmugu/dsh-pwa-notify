@@ -253,8 +253,14 @@ export function createPushState(opts = {}) {
       return state.subscriptions.map((s) => ({ ...s }))
     },
 
-    /** Add or refresh one subscription (keyed by endpoint). */
-    addSubscription(sub) {
+    /**
+     * Add or refresh one subscription (keyed by endpoint). `meta` carries the
+     * client-derived label (device/UA hint); a re-POST of a known endpoint
+     * (the returning-visitor resync) refreshes label/updatedAt while keeping
+     * firstSeenAt — that timestamp is what tells an active device from an
+     * abandoned one in the management list.
+     */
+    addSubscription(sub, meta = {}) {
       const clean = {
         endpoint: String(sub.endpoint || ''),
         p256dh: String((sub.keys && sub.keys.p256dh) || ''),
@@ -263,11 +269,44 @@ export function createPushState(opts = {}) {
       if (!/^https?:\/\//.test(clean.endpoint) || !clean.p256dh || !clean.auth) {
         throw new Error('subscription needs endpoint, keys.p256dh and keys.auth')
       }
+      const label = typeof meta.label === 'string' ? meta.label.slice(0, 60) : ''
+      const now = Date.now()
       const i = state.subscriptions.findIndex((s) => s.endpoint === clean.endpoint)
-      if (i >= 0) state.subscriptions[i] = clean
-      else state.subscriptions.push(clean)
+      if (i >= 0) {
+        state.subscriptions[i] = {
+          ...clean,
+          label: label !== '' ? label : state.subscriptions[i].label || '',
+          firstSeenAt: state.subscriptions[i].firstSeenAt ?? now,
+          updatedAt: now,
+        }
+      } else {
+        state.subscriptions.push({ ...clean, label, firstSeenAt: now, updatedAt: now })
+      }
       save()
       return state.subscriptions.length
+    },
+
+    /**
+     * Management view of the subscriptions: NEVER the crypto material —
+     * only identity/routing hints the settings card renders.
+     */
+    listDevices() {
+      return state.subscriptions.map((sub, i) => {
+        let host = ''
+        try {
+          host = new URL(sub.endpoint).host
+        } catch {
+          host = ''
+        }
+        return {
+          id: i,
+          endpoint: sub.endpoint,
+          host,
+          label: sub.label || '未知设备',
+          firstSeenAt: sub.firstSeenAt ?? null,
+          updatedAt: sub.updatedAt ?? null,
+        }
+      })
     },
 
     removeSubscription(endpoint) {

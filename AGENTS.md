@@ -51,7 +51,7 @@
 ## 4. 命令
 
 ```sh
-npm test        # node --test：25 个用例（策略、开关、文案模板、路由、index 改写、RFC 8291 向量、VAPID JWT、推送广播）
+npm test        # node --test：26 个用例（策略、开关、文案模板、路由、index 改写、RFC 8291 向量、VAPID JWT、推送广播）
 npm run icons   # 重新生成 pwa/icons/*.png
 ```
 

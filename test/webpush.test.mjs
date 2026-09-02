@@ -32,7 +32,7 @@ import {
   hkdf,
   publicFromRaw,
 } from '../src/webpush.js'
-import { handleSubscribe, handleUnsubscribe, handleVapid, BASE } from '../src/index.js'
+import { handleSubscribe, handleUnsubscribe, handleVapid, handleDevices, handleDeviceRemove, BASE } from '../src/index.js'
 
 // --- RFC 8291 Appendix A: known-answer vector --------------------------------
 
@@ -251,6 +251,60 @@ test('subscribe/vapid routes: same-origin enforced, subscription persisted', asy
   }
 })
 
+test('device management: metadata merge, list sanitization, removal', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-pwa-notify-'))
+  try {
+    const push = createPushState({ stateFile: join(dir, 'state.json') })
+    const sub = { endpoint: 'https://web.push.apple.com/x1', keys: { p256dh: 'A', auth: 'B' } }
+
+    await handleSubscribe(push, mockReq({
+      method: 'POST', url: `${BASE}/subscribe`,
+      headers: { origin: 'http://ok:1', host: 'ok:1' },
+      body: JSON.stringify({ subscription: sub, device: { label: 'iPhone 18_2 · 主屏' } }),
+    }), mockRes())
+
+    const resList = mockRes()
+    handleDevices(push, mockReq({ url: `${BASE}/devices` }), resList)
+    assert.equal(resList.state.status, 200)
+    const devices = JSON.parse(resList.state.body).devices
+    assert.equal(devices.length, 1)
+    assert.equal(devices[0].label, 'iPhone 18_2 · 主屏')
+    assert.equal(devices[0].host, 'web.push.apple.com')
+    // crypto material must NEVER appear in the management view
+    const rawList = String(resList.state.body)
+    assert.ok(!rawList.includes('"p256dh"') && !rawList.includes('"auth"'))
+
+    // same endpoint re-POST (resync) refreshes updatedAt, keeps firstSeenAt
+    await sleep(20)
+    await handleSubscribe(push, mockReq({
+      method: 'POST', url: `${BASE}/subscribe`,
+      headers: { origin: 'http://ok:1', host: 'ok:1' },
+      body: JSON.stringify({ subscription: sub, device: { label: 'iPhone 18_2 · 主屏' } }),
+    }), mockRes())
+    const resList2 = mockRes()
+    handleDevices(push, mockReq({ url: `${BASE}/devices` }), resList2)
+    const d2 = JSON.parse(resList2.state.body).devices[0]
+    assert.equal(d2.firstSeenAt, devices[0].firstSeenAt)
+    assert.ok(d2.updatedAt > devices[0].updatedAt)
+
+    // removal route: same-origin enforced, then removes
+    const res403 = mockRes()
+    await handleDeviceRemove(push, mockReq({ method: 'POST', headers: { origin: 'http://evil', host: 'ok' }, body: '{}' }), res403)
+    assert.equal(res403.state.status, 403)
+    const resDel = mockRes()
+    await handleDeviceRemove(push, mockReq({
+      method: 'POST', url: `${BASE}/devices/remove`,
+      headers: { origin: 'http://ok:1', host: 'ok:1' },
+      body: JSON.stringify({ endpoint: sub.endpoint }),
+    }), resDel)
+    assert.equal(resDel.state.status, 200)
+    assert.equal(JSON.parse(resDel.state.body).removed, 1)
+    assert.equal(push.subscriptions().length, 0)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('broadcast: real HTTP to a local push stub, aes128gcm + VAPID on the wire, 410 prunes', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-pwa-notify-'))
   const seen = []
@@ -295,3 +349,7 @@ test('broadcast: real HTTP to a local push stub, aes128gcm + VAPID on the wire, 
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
