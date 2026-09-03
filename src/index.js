@@ -617,8 +617,11 @@ export function handleVapid(pushState, req, res) {
 // sat UNDER the status bar ("界面整体上移"): position:fixed app chrome ignores
 // body padding entirely, and iOS evaluates env() as 0 on the cold-start
 // frame. The edge-to-edge experiment is REVERTED — the stock letterboxed
-// layout (system bars over opaque strips) is what "normal" means, and the
-// remaining SAFE_AREA_CSS below carries only rules with no layout impact.
+// layout (system bars over opaque strips) is what "normal" means. The two
+// shell tweaks that survived it (overscroll guard, 16px input font) were
+// likewise removed in v0.8.1: generic UI behavior fixes are not this
+// plugin's job — they moved to the user's other UI plugin. This plugin no
+// longer injects any <style> into the page.
 // ---------------------------------------------------------------------------
 
 /** Drop manifest links other than this plugin's (ours renders FIRST via the
@@ -633,21 +636,6 @@ export function stripExistingManifestLink(html) {
 export function adaptIndexHtml(html) {
   return stripExistingManifestLink(html)
 }
-
-// PWA-only shell tweaks with ZERO layout impact (unlike the reverted
-// safe-area padding above): stop the browser's pull-to-refresh gesture from
-// reloading the app mid-conversation, and keep iOS from zooming the page
-// when a sub-16px input (the composer) gets focus.
-const SAFE_AREA_CSS = `/* dsh-pwa-notify · installed-PWA shell tweaks (no layout impact) */
-@media (display-mode: standalone) {
-  body {
-    overscroll-behavior-y: none;
-  }
-  [data-slot="conversation"] input,
-  [data-slot="conversation"] textarea {
-    font-size: max(16px, 1em);
-  }
-}`
 
 // ---------------------------------------------------------------------------
 // Static PWA assets, served by the DSH host itself (no gateway, like
@@ -1080,7 +1068,6 @@ export function apply(ctx, config = {}) {
         // screenshot. Full-square PNG; iOS applies its own corner mask.
         html: `<link rel="manifest" href="${BASE}/manifest.json"><link rel="apple-touch-icon" href="${BASE}/icon-apple-180.png"><meta name="theme-color" content="#0f1115">`,
       })
-      table.push({ kind: 'style', text: SAFE_AREA_CSS })
       // The VAPID public key, fresh at emit time (first boot generates it
       // before the first index render can happen).
       if (cfg.push && pushState !== null) {
