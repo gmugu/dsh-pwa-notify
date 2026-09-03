@@ -70,7 +70,7 @@ npm run icons   # 重新生成 pwa/icons/*.png
 ## 6. 安装模型（开发 ≠ 运行）
 
 - **项目目录只是开发区**：live DSH 跑的是 `npm run install:profile`（= `scripts/install-to-profile.mjs`：测试 → pack → 落位 `$DSH_HOME/plugins-packages/dsh-pwa-notify-current.tgz`（**固定文件名**，profile 依赖指向它，版本间不腐烂）→ profile 里 `pnpm add file:...`）。tarball 是真实副本：装完之后改项目目录对运行中的 DSH 零影响。
-- **切换依赖必须 remove + add**：`pnpm add` 不会刷新已存在的 symlink——先 `pnpm remove dsh-pwa-notify` 再 add，否则 node_modules 里残留指回项目目录的旧链接（踩过：lockfile specifier 更新了、version 仍是 link:，测试全绿但跑的是源码目录）。
+- **切换依赖必须 remove + add**：`pnpm add` 对**同版本号、同路径**的 tarball 同样不刷新已装副本（踩过两次：link: 残留、0.8.0 文件级修复假部署——测试全绿但 node_modules 里还是旧文件）。`scripts/install-to-profile.mjs` 已内置 remove→add；手写部署命令时必须沿用这个顺序。
 - **npm pack 不含 node_modules**（files 白名单也拦不住这条 npm 硬规则），所以见上条 schemastery 双供给。
 - 沙箱/EROFS：pnpm 写 profile 失败时报 `[EROFS] read-only file system` 且 exit 226——不是包的问题，是当前 shell 没有该目录写权限。
 

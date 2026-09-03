@@ -49,10 +49,19 @@ mkdirSync(tmpDir, { recursive: true })
 run('npm', ['pack'], ROOT, { npm_config_cache: cacheDir, npm_config_tmp: tmpDir })
 const tarball = join(ROOT, `dsh-pwa-notify-${pkg.version}.tgz`)
 
-// 3. stage at the stable path and install into the profile
+// 3. stage at the stable path and install into the profile.
+// ALWAYS remove-then-add: pnpm does not refresh an already-installed file:
+// tarball when the specifier is unchanged (same path, same version number —
+// it skips re-extraction and the old copy stays). Removing first forces a
+// clean materialization every time.
 mkdirSync(PKG_DIR, { recursive: true })
 copyFileSync(tarball, STABLE_TGZ)
 const rel = relative(PROFILE, STABLE_TGZ)
+try {
+  run('pnpm', ['remove', 'dsh-pwa-notify'], PROFILE)
+} catch {
+  /* not installed yet — fine */
+}
 run('pnpm', ['add', `file:${rel}`], PROFILE)
 
 console.log(`\n[install-to-profile] dsh-pwa-notify@${pkg.version} installed as a packed copy.`)
