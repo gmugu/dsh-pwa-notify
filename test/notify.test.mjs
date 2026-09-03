@@ -5,12 +5,15 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createPushState } from '../src/webpush.js'
 import {
   decideNotification,
+  defaultStateFile,
+  legacyStateFile,
+  migrateStateFile,
   adaptIndexHtml,
   stripExistingManifestLink,
   renderTemplate,
@@ -235,6 +238,34 @@ test('stripExistingManifestLink keeps this plugin link, drops others', () => {
   const out = stripExistingManifestLink(html)
   assert.match(out, /_dsh\/pwa-notify\/manifest\.json/)
   assert.doesNotMatch(out, /manifest\.webmanifest/)
+})
+
+// --- state file migration --------------------------------------------------------
+
+test('migrateStateFile: renames legacy file once, no-op otherwise', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-pwa-notify-'))
+  try {
+    const oldPath = join(dir, 'pwa-notify-state.json')
+    const newPath = join(dir, 'storages', 'dsh-pwa-notify.json')
+    // no old file -> no-op
+    assert.equal(migrateStateFile(oldPath, newPath), false)
+    // old exists -> rename, content preserved, old gone
+    writeFileSync(oldPath, '{"vapid":{"x":1}}')
+    assert.equal(migrateStateFile(oldPath, newPath), true)
+    assert.equal(readFileSync(newPath, 'utf8'), '{"vapid":{"x":1}}')
+    assert.equal(existsSync(oldPath), false)
+    // new already there -> never touches the old path again
+    writeFileSync(oldPath, '{"stale":true}')
+    assert.equal(migrateStateFile(oldPath, newPath), false)
+    assert.equal(readFileSync(newPath, 'utf8'), '{"vapid":{"x":1}}')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('defaultStateFile points into storages/, legacy at home root', () => {
+  assert.ok(defaultStateFile({ DSH_HOME: '/dsh' }).endsWith(join('storages', 'dsh-pwa-notify.json')))
+  assert.ok(legacyStateFile({ DSH_HOME: '/dsh' }).endsWith('pwa-notify-state.json'))
 })
 
 // --- route handlers ---------------------------------------------------------

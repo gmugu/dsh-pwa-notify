@@ -20,7 +20,7 @@
 
 - **无构建、依赖极简**：走 dsh-mobile-hanui 的纯 JS 路线——不引入 TypeScript / 打包器 / 运行时依赖（`defineTool` 是手工内联等价物，Web Push 用 node:crypto 手写）；唯一例外是 settings schema 必需的 `@deepseek-ai/schemastery`（见下条）。新增依赖前先问：能不能 node: 内置解决。
 - **RFC 8291 已知答案向量是加密代码的唯一护栏**：`src/webpush.js` 的 `encryptPayload` 改任何一行（HKDF 接线、点编码、GCM 用法、header 布局），`test/webpush.test.mjs` 的 Appendix A 向量必须仍然逐字节通过。没有它，手写加密错了只会在真手机上静默失败。
-- **VAPID 密钥必须持久化**：`$DSH_HOME/pwa-notify-state.json` 里的密钥对一旦重新生成，所有已订阅设备全部失效。状态文件原子写（tmp+rename），`createPushState` 的状态是每实例闭包——**不要**用共享默认对象浅拷贝初始化（曾因此让一个实例的订阅漏进下一个实例）。
+- **VAPID 密钥必须持久化**：`$DSH_HOME/storages/dsh-pwa-notify.json`（v0.8.2 起按插件状态惯例放 storages/；旧根目录文件由 `migrateStateFile` 一次性 rename 迁移）里的密钥对一旦重新生成，所有已订阅设备全部失效。状态文件原子写（tmp+rename），`createPushState` 的状态是每实例闭包——**不要**用共享默认对象浅拷贝初始化（曾因此让一个实例的订阅漏进下一个实例）。
 - **推送是唯一通知通道**（用户决定移除轮询兜底）：事件腿统一走 `apply` 里的 `emit()`（fire-and-forget 广播）；`notify_user` 工具与 `/test` 直接 `await pushState.broadcast()` 拿真实 2xx 送达数。不要 reintroduce 缓冲/轮询通道——一条推送失败即丢失是**已接受的取舍**，设备下次打开应用时自动重订阅自愈。
 - **SW 永远不加 fetch handler**：DSH 的 JS/CSS 每次部署都变且文件名不变，任何缓存策略都会造成「新 DOM + 旧 CSS」（dsh-zen-remote sw v2→v3 的事故复盘）。本插件的 SW 只做通知展示（push 事件 + showNotification）和点击聚焦。
 - **通知策略保持「需要你才响」**：**免防打扰压制**的腿 = 等授权 / 等回答（**含计划审阅**，exit_plan_mode 与 ask_user_question 共用 userQuestions.ask() 阻塞通道，按 tool/call 名字白名单识别）/ 回合出错（agent/error，仅顶层会话）/ 目标受阻（update_goal action=blocked）；**受压制**的腿 = 回合结束（默认关）与后台任务结算（默认开）。设置卡片可关各腿。子代理的完成/出错永远不推。默认语义源自 dsh-zen-remote（1.0.3 起回合结束默认不推），不要「顺手改默认值」。
@@ -54,7 +54,7 @@
 ## 4. 命令
 
 ```sh
-npm test        # node --test：26 个用例（策略、开关、文案模板、路由、index 改写、RFC 8291 向量、VAPID JWT、推送广播）
+npm test        # node --test：28 个用例（策略、开关、文案模板、路由、index 改写、RFC 8291 向量、VAPID JWT、推送广播）
 npm run icons   # 重新生成 pwa/icons/*.png
 ```
 

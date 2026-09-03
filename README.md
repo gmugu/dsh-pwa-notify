@@ -81,7 +81,7 @@ sudo systemctl restart dsh      # 或你的进程管理方式
     push: true             # false 全关推送
 ```
 
-`turnEnd` / `includeSummary` 可作初始值写在行里；设置卡片保存过之后以设置存储为准。VAPID 密钥与订阅列表在 `$DSH_HOME/pwa-notify-state.json`（删掉 = 作废全部已订阅设备并重新生成密钥）。
+`turnEnd` / `includeSummary` 可作初始值写在行里；设置卡片保存过之后以设置存储为准。VAPID 密钥与订阅列表在 `$DSH_HOME/storages/dsh-pwa-notify.json`（删掉 = 作废全部已订阅设备并重新生成密钥）。
 
 ## 已知限制
 

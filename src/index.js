@@ -42,6 +42,7 @@
  * the window on click.
  */
 
+import { existsSync, mkdirSync, renameSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -52,9 +53,38 @@ import { createPushState } from './webpush.js'
 /** All host routes live under this prefix (one `prefix` webServer route). */
 export const BASE = '/_dsh/pwa-notify'
 
-/** Push state (VAPID keys + subscriptions) lives beside the DSH config. */
+/**
+ * Push state (VAPID keys + subscriptions). Since v0.8.2 it lives under
+ * $DSH_HOME/storages/ — the DSH convention for plugin state data (the home
+ * root is reserved for settings.yaml / profiles / logs; dsh-login-gate and
+ * the ctx.storage JSON backend both put state in storages/).
+ */
 export function defaultStateFile(env = process.env) {
+  return join(env.DSH_HOME ?? join(homedir(), '.dsh'), 'storages', 'dsh-pwa-notify.json')
+}
+
+/** Pre-0.8.2 location, kept only for the one-time migration below. */
+export function legacyStateFile(env = process.env) {
   return join(env.DSH_HOME ?? join(homedir(), '.dsh'), 'pwa-notify-state.json')
+}
+
+/**
+ * One-time move of the pre-0.8.2 state file into storages/. A rename (not a
+ * copy) on purpose: the VAPID keypair must never exist in two places, and a
+ * leftover old file would silently win on a rollback then double-migrate.
+ * No-op when the new file already exists or the old one never did.
+ * @returns true when a migration happened.
+ */
+export function migrateStateFile(oldPath, newPath) {
+  try {
+    if (existsSync(newPath) || !existsSync(oldPath)) return false
+    mkdirSync(dirname(newPath), { recursive: true, mode: 0o700 })
+    renameSync(oldPath, newPath)
+    return true
+  } catch (error) {
+    console.warn(`[dsh-pwa-notify] state migration failed: ${error && error.message}`)
+    return false
+  }
 }
 
 /** Plugin-row config with shipped defaults (see README for the knob table). */
@@ -903,6 +933,7 @@ export function apply(ctx, config = {}) {
   let pushState = null
   if (cfg.push) {
     try {
+      migrateStateFile(legacyStateFile(), defaultStateFile())
       pushState = createPushState({ stateFile: defaultStateFile(), subject: cfg.vapidSubject })
     } catch (e) {
       console.warn(`[dsh-pwa-notify] Web Push disabled: ${String((e && e.message) || e)}`)
