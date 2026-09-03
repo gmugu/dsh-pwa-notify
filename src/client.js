@@ -5,10 +5,7 @@
  *   1. registers the service worker served by this plugin's host half at
  *      /_dsh/pwa-notify/sw.js with scope "/" (the host sends
  *      Service-Worker-Allowed: /);
- *   2. asks for notification permission through an opt-in bottom card
- *      (7-day snooze, iOS installed-PWA hint — the flow dsh-zen-remote's
- *      pwa/inject.js proved out);
- *   3. subscribes to Web Push with the VAPID key the host injects into the
+ *   2. subscribes to Web Push with the VAPID key the host injects into the
  *      page (__DSH_PWA_NOTIFY_VAPID__) — iOS only allows this from a
  *      home-screen install, never a Safari tab, so the card guides there.
  *
@@ -30,10 +27,7 @@ window.__ModuleLoader__.load({
     const h = react.createElement
 
     const BASE = '/_dsh/pwa-notify'
-    const SNOOZE_KEY = 'dsh-pwa-notify-snooze'
     const DISABLE_KEY = 'dsh-pwa-notify'
-    const CARD_ID = 'dsh-pwa-notify-card'
-    const SNOOZE_MS = 7 * 24 * 3600 * 1000
     const ICON = BASE + '/icon-192.png'
 
     const state = {
@@ -146,21 +140,6 @@ window.__ModuleLoader__.load({
       }
     }
 
-    function snoozed() {
-      try {
-        const at = Number(localStorage.getItem(SNOOZE_KEY) || 0)
-        return Date.now() - at < SNOOZE_MS
-      } catch (_) {
-        return false
-      }
-    }
-
-    function snooze() {
-      try {
-        localStorage.setItem(SNOOZE_KEY, String(Date.now()))
-      } catch (_) {}
-    }
-
     // ---- service worker ----------------------------------------------------
 
     async function registerSW() {
@@ -186,117 +165,6 @@ window.__ModuleLoader__.load({
       }
     }
 
-    // ---- opt-in card (DOM, zen-remote inject.js style) ---------------------
-
-    const BTN_ON =
-      '<button data-act="on" style="flex:1;background:#4c8dff;color:#fff;border:0;border-radius:9px;padding:9px 0;font-weight:600">开启</button>'
-    const BTN_OFF =
-      '<button data-act="off" style="flex:1;background:#2a2f3a;color:#9aa3b2;border:0;border-radius:9px;padding:9px 0">暂不</button>'
-    const BTN_CLOSE =
-      '<button data-act="off" style="flex:1;background:#2a2f3a;color:#9aa3b2;border:0;border-radius:9px;padding:9px 0">知道了</button>'
-    const BTN_TEST =
-      '<button data-act="test" style="flex:1;background:#4c8dff;color:#fff;border:0;border-radius:9px;padding:9px 0;font-weight:600">发个测试通知</button>'
-    const BTN_DONE =
-      '<button data-act="off" style="flex:1;background:#2a2f3a;color:#9aa3b2;border:0;border-radius:9px;padding:9px 0">完成</button>'
-
-    function removeCard() {
-      if (state.card) {
-        state.card.remove()
-        state.card = null
-      }
-    }
-
-    function card(title, bodyHtml, buttonsHtml) {
-      removeCard()
-      const el = document.createElement('div')
-      el.id = CARD_ID
-      el.style.cssText =
-        'position:fixed;left:max(12px,env(safe-area-inset-left));right:max(12px,env(safe-area-inset-right));' +
-        'bottom:max(96px,calc(env(safe-area-inset-bottom) + 96px));z-index:2147483005;max-width:420px;margin:0 auto;' +
-        'background:rgba(22,26,34,.96);border:1px solid #2a2f3a;border-radius:14px;' +
-        'padding:14px 16px;color:#e6e8ec;font:13px/1.6 system-ui;' +
-        '-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);box-shadow:0 10px 30px rgba(0,0,0,.5)'
-      el.innerHTML =
-        '<div style="font-weight:600;margin-bottom:4px">' + title + '</div>' +
-        '<div style="color:#9aa3b2;margin-bottom:10px">' + bodyHtml + '</div>' +
-        '<div style="display:flex;gap:8px">' + buttonsHtml + '</div>'
-      document.body.appendChild(el)
-      state.card = el
-      return el
-    }
-
-    async function requestPermissionInGesture() {
-      try {
-        // Must run inside the click gesture: Safari rejects permission
-        // requests (and subscription) outside one.
-        return await window.Notification.requestPermission()
-      } catch (err) {
-        console.warn('[dsh-pwa-notify] permission request failed:', err)
-        return 'denied'
-      }
-    }
-
-    function showGrantedCard() {
-      const viaPush = state.pushReady
-      const el = card(
-        '🔔 通知已开启',
-        viaPush
-          ? '已订阅系统级推送：智能体等你授权、等你回答时会推到锁屏——即使这个应用已被系统杀掉。想确认链路，发一条试试。'
-          : '智能体等你授权 / 提问时会提醒你（本页面在后台时）。想确认链路，发一条试试。',
-        BTN_TEST + BTN_DONE,
-      )
-      el.querySelector('[data-act="test"]').addEventListener('click', function () {
-        sendTest()
-      })
-      el.querySelector('[data-act="off"]').addEventListener('click', function () {
-        removeCard()
-      })
-    }
-
-    function showAskCard() {
-      if (!notifSupported()) {
-        if (isIOS() && !isStandalone()) {
-          showIOSHintCard()
-        }
-        return
-      }
-      if (permission() === 'denied') return
-      if (permission() === 'granted') return
-      const el = card(
-        '🔔 DSH 通知',
-        '开启后，智能体等你授权、等你回答时会推送系统通知到这台设备——页面切到后台也会响。通知不含对话正文。',
-        BTN_ON + BTN_OFF,
-      )
-      el.querySelector('[data-act="on"]').addEventListener('click', function () {
-        el.remove()
-        requestPermissionInGesture().then(function (result) {
-          if (result === 'granted') {
-            // Inside the click's promise chain where possible: Safari wants
-            // the subscribe call tied to the user gesture too.
-            subscribePush().then(function () {
-              showGrantedCard()
-            })
-          }
-        })
-      })
-      el.querySelector('[data-act="off"]').addEventListener('click', function () {
-        snooze()
-        removeCard()
-      })
-    }
-
-    function showIOSHintCard() {
-      const el = card(
-        '🔔 DSH 通知',
-        '在 iPhone / iPad 上，通知只对「添加到主屏幕」后的应用生效。请先用 Safari 分享菜单把 DSH 添加到主屏幕，再从主屏图标打开本页。',
-        BTN_CLOSE,
-      )
-      el.querySelector('[data-act="off"]').addEventListener('click', function () {
-        snooze()
-        removeCard()
-      })
-    }
-
     async function sendTest() {
       try {
         await fetch(BASE + '/test', {
@@ -312,12 +180,8 @@ window.__ModuleLoader__.load({
     // ---- public debug/API surface ------------------------------------------
 
     window.__DSH_PWA_NOTIFY__ = {
-      ask: function () {
-        showAskCard()
-      },
       test: function () {
         if (permission() === 'granted') sendTest()
-        else showAskCard()
       },
       status: function () {
         return {
@@ -340,7 +204,6 @@ window.__ModuleLoader__.load({
       // subscription — the host may have lost it (state reset, failed POST)
       // and a silent resync needs no prompt (zen-remote's resyncPush).
       if (permission() === 'granted') subscribePush()
-      if (!snoozed() && permission() !== 'granted') showAskCard()
     }
 
     function apply(ctx) {
@@ -365,7 +228,6 @@ window.__ModuleLoader__.load({
             window.removeEventListener('load', state.loadListener)
             state.loadListener = null
           }
-          removeCard()
           state.booted = false
           state.pushReady = false
           // Best-effort: with the plugin gone, its SW has nothing left to
@@ -428,21 +290,6 @@ window.__ModuleLoader__.load({
       }
     }
 
-    var TEXT_FIELDS = [
-      { key: 'textApprovalTitle', label: '授权 · 标题', ph: 'DSH 等你授权' },
-      { key: 'textApprovalBody', label: '授权 · 内容', ph: '{tool} 需要授权才能继续' },
-      { key: 'textQuestionTitle', label: '提问 · 标题', ph: 'DSH 等你回答（含计划审阅）' },
-      { key: 'textQuestionBody', label: '提问 · 内容', ph: '{question}（计划审阅填计划开头；关掉摘要时固定为提示语）' },
-      { key: 'textTurnTitle', label: '完成 · 标题', ph: 'DSH 任务完成' },
-      { key: 'textTurnBody', label: '完成 · 内容', ph: '{summary}（关掉摘要时固定为提示语）' },
-      { key: 'textErrorTitle', label: '出错 · 标题', ph: 'DSH 任务出错' },
-      { key: 'textErrorBody', label: '出错 · 内容', ph: '{error}（诊断信息，不受摘要开关影响）' },
-      { key: 'textGoalTitle', label: '受阻 · 标题', ph: 'DSH 目标受阻' },
-      { key: 'textGoalBody', label: '受阻 · 内容', ph: '{reason}（不受摘要开关影响）' },
-      { key: 'textJobTitle', label: '任务结束 · 标题', ph: 'DSH 后台任务结束' },
-      { key: 'textJobBody', label: '任务结束 · 内容', ph: '{label}（{status}）' },
-    ]
-
     var KIND_TESTS = [
       { kind: 'approval', label: '测试·授权' },
       { kind: 'question', label: '测试·提问' },
@@ -481,6 +328,30 @@ window.__ModuleLoader__.load({
       var msgState = react.useState(null)
       var msg = msgState[0]
       var setMsg = msgState[1]
+
+      // Push onboarding state (mirrored locally so the row refreshes after
+      // an action; the card is the ONLY opt-in entry since v0.8.0 — no
+      // first-load popup anymore).
+      var permState = react.useState(function () { return { perm: permission(), ready: state.pushReady } })
+      var ps = permState[0]
+      var setPs = permState[1]
+      var refreshPerm = function () { setPs({ perm: permission(), ready: state.pushReady }) }
+
+      function enablePush() {
+        setMsg(null)
+        if (ps.perm === 'granted') {
+          subscribePush().then(function () { refreshPerm() })
+          return
+        }
+        requestPermissionInGesture().then(function (result) {
+          if (result === 'granted') {
+            subscribePush().then(function () { refreshPerm() })
+          } else {
+            refreshPerm()
+            setMsg({ kind: 'err', text: '未获得通知权限（' + result + '）。' })
+          }
+        })
+      }
 
       var subState = react.useState(null)
       var subs = subState[0]
@@ -522,41 +393,10 @@ window.__ModuleLoader__.load({
       var ready = snap.status === 'ready'
       var v = ready && snap.value ? snap.value : null
 
-      // text inputs keep local draft state; 保存 writes all six keys at once
-      var draftState = react.useState({})
-      var draft = draftState[0]
-      var setDraft = draftState[1]
-      var draftFor = function (key) {
-        return key in draft ? draft[key] : v ? String(v[key] || '') : ''
-      }
-      var setDraftKey = function (key, value) {
-        var next = Object.assign({}, draft)
-        next[key] = value
-        setDraft(next)
-      }
-
       function saveToggle(key, checked) {
         setMsg(null)
         scope.set(key, checked).then(
           function () { setMsg({ kind: 'ok', text: '已保存，即时生效。' }) },
-          function () { setMsg({ kind: 'err', text: '保存失败，请重试。' }) },
-        )
-      }
-
-      function saveTexts() {
-        setMsg(null)
-        var chain = Promise.resolve()
-        var _loop = function (f) {
-          if (f.key in draft) {
-            chain = chain.then(function () { return scope.set(f.key, draft[f.key].trim()) })
-          }
-        }
-        for (var i = 0; i < TEXT_FIELDS.length; i++) _loop(TEXT_FIELDS[i])
-        chain.then(
-          function () {
-            setDraft({})
-            setMsg({ kind: 'ok', text: '文案已保存，即时生效。' })
-          },
           function () { setMsg({ kind: 'err', text: '保存失败，请重试。' }) },
         )
       }
@@ -574,6 +414,36 @@ window.__ModuleLoader__.load({
         h('h2', { className: 'pwn-section-title' }, '通知推送'),
         h('p', { className: 'pwn-section-desc' }, 'PWA 锁屏推送的开关、文案与测试'),
         !ready ? h('p', { className: 'pwn-hint' }, '正在读取设置…') : null,
+        ready ? h('div', { className: 'pwn-field' },
+          h('label', { className: 'pwn-label' }, '推送状态'),
+          h('div', { className: 'pwn-row' },
+            ps.ready
+              ? h('button', { type: 'button', className: 'pwn-btn', disabled: true, style: { opacity: 0.5, cursor: 'default' } }, '已开启推送')
+              : ps.perm === 'denied'
+                ? h('button', { type: 'button', className: 'pwn-btn', disabled: true, style: { opacity: 0.5, cursor: 'default' } }, '通知权限被拒绝')
+                : !secureOk()
+                  ? h('button', { type: 'button', className: 'pwn-btn', disabled: true, style: { opacity: 0.5, cursor: 'default' } }, '需要 HTTPS')
+                  : isIOS() && !isStandalone()
+                    ? h('button', { type: 'button', className: 'pwn-btn', disabled: true, style: { opacity: 0.5, cursor: 'default' } }, '先添加到主屏幕')
+                    : h('button', { type: 'button', className: 'pwn-btn', onClick: enablePush }, ps.perm === 'granted' ? '重新连接' : '开启通知')
+          ),
+          h('p', { className: 'pwn-hint' },
+            ps.ready
+              ? '本机已在接收推送。'
+              : ps.perm === 'denied'
+                ? '通知权限已被拒绝，请到系统/浏览器的站点设置里重新允许后刷新。'
+                : !secureOk()
+                  ? '当前是非安全上下文（http），Service Worker 与推送不可用。'
+                  : isIOS() && !isStandalone()
+                    ? 'iPhone 上推送只对「添加到主屏幕」后的应用生效：先用 Safari 分享菜单添加，再从主屏图标打开本页开启。'
+                    : ps.perm === 'granted'
+                      ? '权限已授予但订阅未连上，点「重新连接」重试。'
+                      : '开启后，智能体等你授权、等你回答、出错时会推送到这台设备（含锁屏）。'
+          ),
+          h('div', { className: 'pwn-row' },
+            h('button', { type: 'button', className: 'pwn-btn-ghost', onClick: refreshPerm }, '刷新状态')
+          )
+        ) : null,
         ready ? h('div', { className: 'pwn-field' },
           h('label', { className: 'pwn-label' }, '推送开关'),
           h('label', { className: 'pwn-check' },
@@ -605,27 +475,6 @@ window.__ModuleLoader__.load({
             '通知带对话摘要（填入 {question} / {summary}）'
           ),
           h('p', { className: 'pwn-hint' }, '子代理的回合完成永远不推。')
-        ) : null,
-        ready ? h('div', { className: 'pwn-field' },
-          h('label', { className: 'pwn-label' }, '推送文案'),
-          TEXT_FIELDS.map(function (f) {
-            return h('input', {
-              key: f.key,
-              className: 'pwn-input',
-              type: 'text',
-              placeholder: f.ph,
-              value: draftFor(f.key),
-              onChange: function (e) { setDraftKey(f.key, e.target.value) },
-            })
-          }),
-          h('div', { className: 'pwn-row' },
-            h('button', { type: 'button', className: 'pwn-btn', onClick: saveTexts }, '保存文案')
-          ),
-          h('p', { className: 'pwn-hint' },
-            '留空用默认。可用变量：', h('span', { className: 'pwn-code' }, '{tool}'), ' 工具名、',
-            h('span', { className: 'pwn-code' }, '{question}'), ' 提问原文、',
-            h('span', { className: 'pwn-code' }, '{summary}'), ' 本回合摘要；后两个只在开启「带摘要」时有内容。'
-          )
         ) : null,
         ready ? h('div', { className: 'pwn-field' },
           h('label', { className: 'pwn-label' }, '测试发送'),

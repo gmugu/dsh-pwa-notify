@@ -5,6 +5,7 @@
 ## 0. 协作规则（最高优先级）
 
 - **git 提交必须等用户确认**：改完代码/文档先跑测试、给出变更摘要，用户明确点头后才执行 `git commit`；禁止顺手提交。
+- **一个功能一条提交**：一次改动只含一个功能（含它的测试与文档同步）；多功能混合的提交要先拆分。
 - **push 永远由用户执行**：本机没有 GitHub 凭据，且推送时机由用户决定。
 
 ## 1. 这是什么
@@ -27,7 +28,9 @@
 - **决策层必须是纯函数**：`decideNotification` / `turnSummary` / `assistantText` / `pendingQuestionText` 全部纯函数导出，测试不经真实会话（建真实会话耗 token，是工作区硬约束）。宿主侧接线（`apply`）只做薄封装。
 - **工具名是 `notify_user` 不是 `push_notify`**：刻意与 dsh-zen-remote 区分（避免同装冲突）。注册包 try/catch：与部署里同名工具撞名时降级为告警，不许把插件行带崩。
 - **schemastery 是正式 dependencies**：开发目录跑一次 `npm install` 装真实副本（registry 可达），打包安装的副本由 profile 解析同一依赖。**不要**手工往 node_modules 里放 symlink 代替安装——`npm pack`/npm 脚本加载依赖树时会按 package.json 收敛 node_modules，手工 symlink 会被清掉（踩过：symlink 蒸发 → 测试全挂 ERR_MODULE_NOT_FOUND）。
-- **设置是双层的**：用户层（开关 + 文案模板）走 `settings.register('dsh-pwa-notify', SettingsSchema)`，`scope.watch` 热更新 `apply` 里的 `cfg`；行配置只提供静态项（grace/debounce/subject/push/tool）和 `turnEndPush`/`includeSummary` 的 base 初始值。`renderTexts` 是纯函数，`decideNotification` 和 `/test` 预览共用——改文案逻辑必须同时过两边的测试。
+- **设置是双层的（v0.8.0 起开关-only）**：用户层走 `settings.register('dsh-pwa-notify', SettingsSchema)`（六开关 + includeSummary，**无文案模板**——自定义功能已按用户要求移除，文案为 `DEFAULT_TEXTS` 固定），`scope.watch` 热更新 `apply` 里的 `cfg`；行配置只提供静态项（grace/debounce/subject/push/tool）和 `turnEndPush`/`includeSummary` 的 base 初始值。`renderTexts` 是纯函数，`decideNotification` 和 `/test` 预览共用。
+- **/test 预览必须按当前实时配置渲染**：不强制 includeSummary——测试按钮收到什么，真实推送就是什么（用户明确要求）。改预览逻辑不许重新引入「强制摘要」的覆盖。
+- **推送开启入口只在设置卡片**（v0.8.0 起）：无首载弹卡、无 ask() API；设置卡片「推送状态」区块是唯一开启入口，已订阅置灰。不要重新引入页面弹卡。
 - **index.html 改写走 tapIndex，注入走 index-inject**：要**编辑既有标签**的改动只能用 `webServer.tapIndex`（结构化注入行只会追加）；tapIndex 在注入之后运行，`stripExistingManifestLink` 必须保留自己的 `/_dsh/pwa-notify/manifest.json`（先注入=第一个=被浏览器采用）。**不要**再尝试 viewport-fit=cover / 安全区 padding 的全屏沉浸方案——v0.5.0 做过、v0.6.2 整体回退：fixed 定位的应用骨架不吃 body padding，iOS 首帧 env() 仍是 0，实测整个 UI 顶到状态栏底下。保留的 shell CSS 只有无布局影响的两条（overscroll 防误刷新、输入框 ≥16px 防聚焦缩放），包在 `@media (display-mode: standalone)` 里。
 - **图标是生成物（DSH 鲸鱼）**：`pwa/icons/whale.svg` 是从 `@deepseek-ai/dsh-web-frontend` 的 favicon vendor 进来的单 path 鲸鱼（DSH 品牌资产）；`npm run icons` 用**宿主安装里的 sharp**（绝对路径加载，仅生成期，不是包依赖）把「渐变圆角块 + 鲸鱼」整图栅格化。宿主 sharp 不在时回退到零依赖的手绘铃铛（手写 PNG 编码器 CRC32 + zlib）。**不要**把 sharp 写进 dependencies；换图改 whale.svg 或排版参数后重跑并提交全部 PNG。
 - **iOS 主屏图标只认 apple-touch-icon**：manifest icons 只服务 Android/桌面 Chrome；Safari 装主屏时读 `<link rel="apple-touch-icon">`（我们注入 180 全方形 PNG，**不能自带圆角/透明**——iOS 自己切圆角，预切会露黑角），没有这个标签就退化为页面截图。且 iOS 在**安装时刻**缓存图标：换图后必须删掉主屏图标重加才生效。

@@ -115,20 +115,8 @@ export const SettingsSchema = z.object({
   goalPush: z.boolean().default(true),
   /** Notify when a background job settles completed/failed (jobs.onJobDone). */
   jobPush: z.boolean().default(true),
-  /** Fill {question}/{summary} template variables with conversation text. */
+  /** Fill {question}/{summary} with conversation text in the fixed texts. */
   includeSummary: z.boolean().default(false),
-  textApprovalTitle: z.string().default(''),
-  textApprovalBody: z.string().default(''),
-  textQuestionTitle: z.string().default(''),
-  textQuestionBody: z.string().default(''),
-  textTurnTitle: z.string().default(''),
-  textTurnBody: z.string().default(''),
-  textErrorTitle: z.string().default(''),
-  textErrorBody: z.string().default(''),
-  textGoalTitle: z.string().default(''),
-  textGoalBody: z.string().default(''),
-  textJobTitle: z.string().default(''),
-  textJobBody: z.string().default(''),
 })
 
 /** Body cap for the POST /test payload. */
@@ -278,11 +266,9 @@ const BODY_MAX = 200
  * @param {object} cfg `{ texts?, includeSummary }`
  */
 export function renderTexts(kind, input, cfg) {
-  const t = (cfg && cfg.texts) || {}
-  const pick = (key) => {
-    const custom = t[key]
-    return typeof custom === 'string' && custom.trim() !== '' ? custom : DEFAULT_TEXTS[key]
-  }
+  // Fixed texts since v0.8.0 (user customization removed): renderTemplate
+  // stays exported because decideNotification/preview share the {var} logic.
+  const pick = (key) => DEFAULT_TEXTS[key]
   // {question}/{summary} are conversation content and honor includeSummary;
   // {error}/{reason}/{label}/{status} are diagnostics/metadata — never gated.
   const vars = {
@@ -497,10 +483,12 @@ export async function handleTest(pushState, getCfg, req, res) {
   let title
   let body
   if (sample !== undefined) {
-    // Live-template preview: sample variables are always filled (they are
-    // samples, not conversation content), regardless of includeSummary.
+    // Preview renders with the LIVE config exactly as a real push would —
+    // includeSummary off means the fixed hint text, on means the sample
+    // question/summary fills the {var}. What the test shows is what a real
+    // event of that kind sends right now.
     const cfg = (typeof getCfg === 'function' ? getCfg() : null) || {}
-    const preview = renderTexts(parsed.kind, sample, { ...cfg, includeSummary: true })
+    const preview = renderTexts(parsed.kind, sample, cfg)
     title = preview.title
     body = preview.body
   } else {
@@ -916,20 +904,6 @@ export function apply(ctx, config = {}) {
       cfg.goalEnabled = value.goalPush !== false
       cfg.jobEnabled = value.jobPush !== false
       cfg.includeSummary = value.includeSummary === true
-      cfg.texts = {
-        approvalTitle: value.textApprovalTitle,
-        approvalBody: value.textApprovalBody,
-        questionTitle: value.textQuestionTitle,
-        questionBody: value.textQuestionBody,
-        turnTitle: value.textTurnTitle,
-        turnBody: value.textTurnBody,
-        errorTitle: value.textErrorTitle,
-        errorBody: value.textErrorBody,
-        goalTitle: value.textGoalTitle,
-        goalBody: value.textGoalBody,
-        jobTitle: value.textJobTitle,
-        jobBody: value.textJobBody,
-      }
     }
     applyLive()
     scope.watch(applyLive)

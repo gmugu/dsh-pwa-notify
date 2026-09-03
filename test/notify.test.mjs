@@ -173,10 +173,6 @@ test('renderTexts: question leg distinguishes plan review; new kinds render vars
   assert.equal(t.body, '断网')
   t = renderTexts('job', { label: 'build', status: 'completed' }, {})
   assert.equal(t.body, 'build（completed）')
-  // custom template wins
-  t = renderTexts('error', { error: '429' }, { texts: { errorTitle: '崩了', errorBody: '原因 {error}' } })
-  assert.equal(t.title, '崩了')
-  assert.equal(t.body, '原因 429')
 })
 
 // --- texts + toggles ----------------------------------------------------------
@@ -187,7 +183,7 @@ test('renderTemplate replaces tokens; unknown/empty vars render empty', () => {
   assert.equal(renderTemplate('a {nope} b', {}), 'a  b')
 })
 
-test('renderTexts: defaults, user overrides, summary gating, clipping', () => {
+test('renderTexts: fixed defaults, summary gating, clipping (texts not customizable since v0.8.0)', () => {
   // default approval body with tool
   let t = renderTexts('approval', { toolName: 'bash' }, {})
   assert.equal(t.title, DEFAULT_TEXTS.approvalTitle)
@@ -195,32 +191,26 @@ test('renderTexts: defaults, user overrides, summary gating, clipping', () => {
   // no tool -> fixed fallback
   t = renderTexts('approval', {}, {})
   assert.equal(t.body, '有操作需要授权才能继续')
-  // custom template wins
-  t = renderTexts('approval', { toolName: 'bash' }, { texts: { approvalTitle: '审批 {tool}', approvalBody: '请处理 {tool}' } })
-  assert.equal(t.title, '审批 bash')
-  assert.equal(t.body, '请处理 bash')
+  // a stray cfg.texts is ignored now
+  t = renderTexts('approval', { toolName: 'bash' }, { texts: { approvalTitle: '审批 {tool}' } })
+  assert.equal(t.title, 'DSH 等你授权')
   // question: summary off -> fixed hint even with input
   t = renderTexts('question', { question: '哪个？' }, {})
   assert.equal(t.body, '智能体提了一个问题，正在等你回答')
-  // summary on -> template renders the question
+  // summary on -> default template renders the question
   t = renderTexts('question', { question: '哪个？' }, { includeSummary: true })
   assert.equal(t.body, '哪个？')
-  // turn-end: summary on, custom template, clip long
-  t = renderTexts('turn-end', { summary: 'x'.repeat(300) }, { includeSummary: true, texts: { turnBody: '{summary}!' } })
+  // turn-end: summary on, clip long
+  t = renderTexts('turn-end', { summary: 'x'.repeat(300) }, { includeSummary: true })
   assert.equal(t.body.length, 200)
-  assert.ok(t.body.endsWith('!') === false || t.body.length <= 200)
 })
 
-test('decideNotification honors toggles and custom texts', () => {
+test('decideNotification honors toggles (texts are fixed since v0.8.0)', () => {
   assert.equal(decideNotification({ kind: 'approval', now: 1, lastSent: 0 }, { ...CFG, approvalEnabled: false }).reason, 'approval-disabled')
   assert.equal(decideNotification({ kind: 'question', now: 1, lastSent: 0 }, { ...CFG, questionEnabled: false }).reason, 'question-disabled')
-  const d = decideNotification(
-    { kind: 'approval', now: 1, lastSent: 0, toolName: 'bash' },
-    { ...CFG, texts: { approvalTitle: '要授权啦' } },
-  )
-  assert.equal(d.title, '要授权啦')
-  // legacy CFG without the new keys keeps old behavior (backwards compat)
-  assert.equal(decideNotification({ kind: 'approval', now: 1, lastSent: 0, toolName: 'bash' }, CFG).body, 'bash 需要授权才能继续')
+  const d = decideNotification({ kind: 'approval', now: 1, lastSent: 0, toolName: 'bash' }, CFG)
+  assert.equal(d.title, 'DSH 等你授权')
+  assert.equal(d.body, 'bash 需要授权才能继续')
 })
 
 // --- index.html shims (tapIndex) ------------------------------------------------
