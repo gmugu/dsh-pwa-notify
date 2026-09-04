@@ -96,7 +96,7 @@ sudo systemctl restart dsh      # 或你的进程管理方式
 
 ```sh
 npm install         # 首次：装 schemastery（settings schema，本地测试必需）
-npm test            # node:test：20 个用例（策略/开关/文案模板/路由/index 改写/RFC 8291 向量/VAPID JWT/推送广播）
+npm test            # node:test：31 个用例（策略/开关/路由/index 改写/RFC 8291 向量/VAPID JWT/推送广播/设置卡片点击冒烟）
 npm run icons       # 重新生成 pwa/icons/*.png（鲸鱼主路径用宿主 sharp，缺失时回退手绘铃铛）
 ```
 

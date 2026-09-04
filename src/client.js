@@ -140,6 +140,20 @@ window.__ModuleLoader__.load({
       }
     }
 
+    // Permission must be asked from inside the click gesture: Safari
+    // (including home-screen PWAs) rejects permission requests made outside
+    // one. Returns 'denied' on throw so the caller can show a message.
+    // (Accidentally deleted with the v0.8.0 card cutover while enablePush
+    // still called it — every first-time opt-in silently died; restored.)
+    async function requestPermissionInGesture() {
+      try {
+        return await window.Notification.requestPermission()
+      } catch (err) {
+        console.warn('[dsh-pwa-notify] permission request failed:', err)
+        return 'denied'
+      }
+    }
+
     // ---- service worker ----------------------------------------------------
 
     async function registerSW() {
@@ -337,16 +351,24 @@ window.__ModuleLoader__.load({
       var setPs = permState[1]
       var refreshPerm = function () { setPs({ perm: permission(), ready: state.pushReady }) }
 
+      // Every branch must leave a visible trace: a subscribePush() failure
+      // used to render as "nothing happened" — surface it as an error line.
+      function finishSubscribe() {
+        subscribePush().then(function (ok) {
+          refreshPerm()
+          if (!ok) setMsg({ kind: 'err', text: '推送订阅失败，请重试（原因见浏览器控制台）。' })
+        })
+      }
+
       function enablePush() {
         setMsg(null)
         if (ps.perm === 'granted') {
-          subscribePush().then(function () { refreshPerm() })
+          finishSubscribe()
           return
         }
         requestPermissionInGesture().then(function (result) {
-          if (result === 'granted') {
-            subscribePush().then(function () { refreshPerm() })
-          } else {
+          if (result === 'granted') finishSubscribe()
+          else {
             refreshPerm()
             setMsg({ kind: 'err', text: '未获得通知权限（' + result + '）。' })
           }
