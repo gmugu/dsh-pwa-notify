@@ -5,7 +5,7 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createPushState } from '../src/webpush.js'
@@ -27,7 +27,11 @@ import {
   turnSummary,
   pendingQuestionText,
   sameOriginPost,
+  sameWorkspace,
+  isMutedWorkspace,
+  buildNotifyTool,
   handleTest,
+  handleWorkspaces,
   handleRoute,
   BASE,
 } from '../src/index.js'
@@ -268,6 +272,69 @@ test('defaultStateFile points into storages/, legacy at home root', () => {
   assert.ok(legacyStateFile({ DSH_HOME: '/dsh' }).endsWith('pwa-notify-state.json'))
 })
 
+// --- workspace mute -----------------------------------------------------------
+
+test('sameWorkspace: spelling, symlinks, foreign dirs, absent cwd', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-pwa-notify-'))
+  try {
+    const ws = join(dir, 'ws')
+    mkdirSync(ws)
+    const canon = realpathSync(ws)
+    // same spelling, messy punctuation
+    assert.equal(sameWorkspace(canon, canon), true)
+    assert.equal(sameWorkspace(canon + '/', canon), true)
+    assert.equal(sameWorkspace(join(dir, 'nope', '..', 'ws'), canon), true)
+    // hand-written non-canonical muted path against a clean cwd
+    assert.equal(sameWorkspace(canon, join(dir, 'ws')), true)
+    // symlinked spelling collapses onto the stored canonical path
+    const link = join(dir, 'link')
+    symlinkSync(ws, link)
+    assert.equal(sameWorkspace(link, canon), true)
+    // a different directory never matches
+    const other = join(dir, 'other')
+    mkdirSync(other)
+    assert.equal(sameWorkspace(realpathSync(other), canon), false)
+    // a subdirectory of the workspace is not the workspace
+    const sub = join(ws, 'sub')
+    mkdirSync(sub)
+    assert.equal(sameWorkspace(sub, canon), false)
+    // absent / garbage cwd never matches (cannot attribute -> not muted)
+    assert.equal(sameWorkspace(undefined, canon), false)
+    assert.equal(sameWorkspace('', canon), false)
+    assert.equal(sameWorkspace(canon, ''), false)
+    // deleted directory with a matching spelling still matches via resolve
+    const gone = join(dir, 'gone')
+    mkdirSync(gone)
+    const goneCanon = realpathSync(gone)
+    rmSync(gone, { recursive: true, force: true })
+    assert.equal(sameWorkspace(goneCanon, goneCanon), true)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('decideNotification: muted workspace silences every kind, before debounce', () => {
+  const muted = { ...CFG_ON, mutedWorkspaces: ['/ws'] }
+  // needs-you legs are muted too — full mute by design (user decision)
+  assert.equal(decideNotification({ kind: 'approval', now: 1, lastSent: 0, toolName: 'bash', cwd: '/ws' }, muted).reason, 'workspace-muted')
+  assert.equal(decideNotification({ kind: 'question', now: 1, lastSent: 0, question: 'q', cwd: '/ws' }, muted).reason, 'workspace-muted')
+  // the low-value legs die the same way, ahead of their own gates
+  assert.equal(decideNotification({ kind: 'turn-end', now: 60000, lastSent: 0, delegationDepth: 0, cwd: '/ws' }, muted).reason, 'workspace-muted')
+  assert.equal(decideNotification({ kind: 'error', now: 1, lastSent: 0, error: 'x', cwd: '/ws' }, muted).reason, 'workspace-muted')
+  assert.equal(decideNotification({ kind: 'job', now: 60000, lastSent: 0, label: 'b', status: 'failed', cwd: '/ws' }, muted).reason, 'workspace-muted')
+  // not attributed, other workspace, or no mute list -> notify as before
+  assert.equal(decideNotification({ kind: 'approval', now: 1, lastSent: 0, toolName: 'bash' }, muted).shouldNotify, true)
+  assert.equal(decideNotification({ kind: 'approval', now: 1, lastSent: 0, toolName: 'bash', cwd: '/other' }, muted).shouldNotify, true)
+  assert.equal(decideNotification({ kind: 'approval', now: 1, lastSent: 0, toolName: 'bash', cwd: '/ws' }, CFG).shouldNotify, true)
+})
+
+test('isMutedWorkspace guards non-array garbage', () => {
+  assert.equal(isMutedWorkspace('/ws', ['/ws']), true)
+  assert.equal(isMutedWorkspace('/ws', undefined), false)
+  assert.equal(isMutedWorkspace('/ws', 'nope'), false)
+  assert.equal(isMutedWorkspace(undefined, ['/ws']), false)
+})
+
 // --- route handlers ---------------------------------------------------------
 
 function mockRes() {
@@ -381,6 +448,86 @@ test('handleRoute: 404 unknown, sw.js carries Service-Worker-Allowed, manifest s
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test('handleWorkspaces: 405 on POST, empty without registry, registry order via route', async () => {
+  const res405 = mockRes()
+  await handleWorkspaces(null, mockReq({ method: 'POST', url: `${BASE}/workspaces` }), res405)
+  assert.equal(res405.state.status, 405)
+  assert.equal(res405.state.headers.allow, 'GET, HEAD')
+
+  // No workspaceRegistry service (Electron-style composition): the card's
+  // data call still succeeds with its empty state.
+  const resNone = mockRes()
+  await handleWorkspaces(null, mockReq({ url: `${BASE}/workspaces` }), resNone)
+  assert.equal(resNone.state.status, 200)
+  const none = JSON.parse(resNone.state.body)
+  assert.equal(none.ok, true)
+  assert.equal(none.registry, false)
+  assert.deepEqual(none.workspaces, [])
+
+  // Registry present: id/title/path projection in registry order.
+  const registry = {
+    list: () => [
+      { id: 'w1', title: '项目甲', path: '/vol1/1000/dsh/projects/alpha' },
+      { id: 'w2', title: '项目乙', path: '/vol1/1000/dsh/projects/beta' },
+    ],
+  }
+  const resList = mockRes()
+  await handleWorkspaces(() => registry, mockReq({ url: `${BASE}/workspaces` }), resList)
+  const list = JSON.parse(resList.state.body)
+  assert.equal(list.registry, true)
+  assert.deepEqual(list.workspaces, [
+    { id: 'w1', title: '项目甲', path: '/vol1/1000/dsh/projects/alpha' },
+    { id: 'w2', title: '项目乙', path: '/vol1/1000/dsh/projects/beta' },
+  ])
+
+  // Same answer through the prefix route dispatcher (the 5th argument).
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-pwa-notify-'))
+  try {
+    const push = createPushState({ stateFile: join(dir, 'state.json') })
+    const resRoute = mockRes()
+    await handleRoute(push, null, mockReq({ url: `${BASE}/workspaces` }), resRoute, () => registry)
+    assert.equal(resRoute.state.status, 200)
+    assert.deepEqual(JSON.parse(resRoute.state.body).workspaces, list.workspaces)
+    // and without the accessor the route still answers (backwards-compatible call)
+    const resBare = mockRes()
+    await handleRoute(push, null, mockReq({ url: `${BASE}/workspaces` }), resBare)
+    assert.equal(JSON.parse(resBare.state.body).registry, false)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('buildNotifyTool: muted workspace drops the call before the throttle, no broadcast', async () => {
+  let broadcasts = 0
+  let armed = 0
+  const push = {
+    broadcast: async () => {
+      broadcasts += 1
+      return { sent: 1, failed: 0, pruned: [] }
+    },
+  }
+  const gate = { arm() { armed += 1 } }
+  const tool = buildNotifyTool(push, gate, { mutedWorkspaces: ['/ws'] })
+
+  const exec = (cwd, id = 's1') => ({
+    signal: { throwIfAborted() {} },
+    agent: { session: { id, header: cwd === undefined ? {} : { cwd } } },
+  })
+
+  // muted: dropped, no broadcast, NO rate-limit budget spent
+  assert.deepEqual(await tool.execute({ title: 'x' }, exec('/ws')), { delivered: 0, muted: true })
+  assert.equal(broadcasts, 0)
+  assert.equal(armed, 0)
+  // immediate second call from a live workspace still sends (throttle unspent)
+  assert.deepEqual(await tool.execute({ title: 'y' }, exec('/other', 's2')), { delivered: 1 })
+  assert.equal(broadcasts, 1)
+  // session without a cwd cannot be attributed -> keeps notifying
+  assert.deepEqual(await tool.execute({ title: 'z' }, exec(undefined, 's3')), { delivered: 1 })
+  // render speaks the mute plainly
+  const mutedRender = tool.output.render({}, { delivered: 0, muted: true })
+  assert.match(mutedRender[0].text, /muted/)
 })
 
 function sleep(ms) {

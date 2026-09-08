@@ -26,8 +26,9 @@ const reactStub = {
 }
 
 /** Boot the real client module. `perm` seeds Notification.permission,
- * `promptResult` is what a requestPermission() prompt returns. */
-function bootClient({ perm = 'default', promptResult = 'granted' } = {}) {
+ * `promptResult` is what a requestPermission() prompt returns, `react`
+ * overrides the React stub (the workspace-mute test injects a stateful one). */
+function bootClient({ perm = 'default', promptResult = 'granted', react = reactStub } = {}) {
   const loadCalls = []
   const calls = [] // recorded fetches
   let prompts = 0
@@ -55,6 +56,9 @@ function bootClient({ perm = 'default', promptResult = 'granted' } = {}) {
     if (url.endsWith('/test')) return { ok: true, sent: 1, title: '测试' }
     if (url.endsWith('/devices')) return { ok: true, devices: [] }
     if (url.endsWith('/devices/remove')) return { ok: true, removed: true }
+    if (url.endsWith('/workspaces')) {
+      return { ok: true, registry: true, workspaces: [{ id: 'w1', title: '项目甲', path: '/ws/alpha' }, { id: 'w2', title: '项目乙', path: '/ws/beta' }] }
+    }
     return { ok: false }
   }
   const sandbox = {
@@ -90,7 +94,7 @@ function bootClient({ perm = 'default', promptResult = 'granted' } = {}) {
     },
   }
   new Function('sandbox', `with (sandbox) {\n${CLIENT_SRC}\n}`)(sandbox)
-  const mod = loadCalls[0].factory(() => reactStub)
+  const mod = loadCalls[0].factory(() => react)
   // `prompts` must be read through a getter — a plain property would
   // snapshot the value (0) at boot instead of tracking the live counter.
   return { mod, sandbox, calls, get prompts() { return prompts } }
@@ -209,4 +213,110 @@ test('prompt denied: no subscribe POST, click stays non-fatal', async () => {
   assert.doesNotThrow(() => optIn.onClick())
   await drain()
   assert.ok(!boot.calls.some((c) => c.url === BASE + '/subscribe'), 'no subscribe after denial')
+})
+
+// --- workspace mute field ---------------------------------------------------
+
+/** Minimal STATEFUL React stand-in: useState slots survive re-renders and a
+ * setter re-runs the component, keeping the latest tree on `.lastTree`. The
+ * default stub renders once from initial state — useless for a card whose
+ * rows arrive from an async fetch (the workspace list). */
+function statefulReact() {
+  const R = {
+    states: [],
+    idx: 0,
+    lastTree: null,
+    rerender: null,
+    renderedOnce: false,
+    pending: [],
+    cleanups: [],
+    createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+    useState(init) {
+      const i = R.idx++
+      if (!(i in R.states)) R.states[i] = typeof init === 'function' ? init() : init
+      return [
+        R.states[i],
+        (v) => {
+          R.states[i] = typeof v === 'function' ? v(R.states[i]) : v
+          if (R.rerender) R.rerender()
+        },
+      ]
+    },
+    // Real React runs an effect AFTER render, once per dep tuple — every
+    // effect in the card uses [] or a stable [scope], so once-per-mount is
+    // the faithful behavior here. That is what issues the card's async
+    // fetches (/devices, /workspaces) without looping on their setstates.
+    useEffect(fn) {
+      if (R.acceptEffects) R.pending.push(fn)
+      return () => {}
+    },
+    render(comp, props) {
+      const run = () => {
+        R.idx = 0
+        const first = !R.renderedOnce
+        R.renderedOnce = true
+        R.acceptEffects = first
+        R.lastTree = comp(props)
+        R.acceptEffects = false
+        if (first) {
+          const pending = R.pending
+          R.pending = []
+          for (const fn of pending) {
+            const cleanup = fn()
+            if (typeof cleanup === 'function') R.cleanups.push(cleanup)
+          }
+        }
+        return R.lastTree
+      }
+      R.rerender = run
+      return run()
+    },
+  }
+  return R
+}
+
+test('按工作区静音: fetches the registry list and checkbox writes the muted path array', async () => {
+  const R = statefulReact()
+  const boot = bootClient({ perm: 'granted', react: R })
+  const slot = applyToSettings(boot.mod)
+
+  const sets = []
+  const scope = {
+    getSnapshot: () => ({ status: 'ready', value: { approvalPush: true, turnEndPush: false, mutedWorkspaces: ['/ws/beta'] } }),
+    subscribe: () => () => {},
+    set: async (key, value) => { sets.push([key, value]) },
+  }
+  R.render(slot.comp, { scope })
+  await drain() // /workspaces fetch resolves -> setSpaces -> re-render
+
+  assert.ok(boot.calls.some((c) => c.url === BASE + '/workspaces'), 'card fetched the workspace list')
+  const flat = []
+  walk(R.lastTree, (n) => flat.push(n))
+  const texts = flat.map(textOf)
+  assert.ok(texts.includes('按工作区静音'), 'field label rendered')
+  assert.ok(texts.includes('/ws/alpha') && texts.includes('/ws/beta'), 'both workspace rows rendered')
+
+  const checkboxAfter = (path) => {
+    const i = flat.findIndex((n) => n.type === 'span' && textOf(n) === path)
+    assert.ok(i >= 0, `row for ${path} exists`)
+    const box = flat.slice(i).find((n) => n.type === 'input' && n.props.type === 'checkbox')
+    assert.ok(box, `checkbox for ${path} exists`)
+    return box
+  }
+
+  // alpha is live (unchecked): checking it PREPENDS its path to the array
+  const alpha = checkboxAfter('/ws/alpha')
+  assert.equal(alpha.props.checked, false, 'alpha initially unmuted')
+  alpha.props.onChange({ target: { checked: true } })
+  await drain()
+  let wrote = sets.filter(([k]) => k === 'mutedWorkspaces')
+  assert.deepEqual(wrote.at(-1)[1], ['/ws/alpha', '/ws/beta'], 'checking alpha adds its path, keeping beta')
+
+  // beta is muted (checked): unchecking it removes its path
+  const beta = checkboxAfter('/ws/beta')
+  assert.equal(beta.props.checked, true, 'beta initially muted')
+  beta.props.onChange({ target: { checked: false } })
+  await drain()
+  wrote = sets.filter(([k]) => k === 'mutedWorkspaces')
+  assert.deepEqual(wrote.at(-1)[1], [], 'unchecking beta empties the mute array')
 })

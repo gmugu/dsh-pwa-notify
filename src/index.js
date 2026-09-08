@@ -42,10 +42,10 @@
  * the window on click.
  */
 
-import { existsSync, mkdirSync, renameSync } from 'node:fs'
+import { existsSync, mkdirSync, realpathSync, renameSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import z from '@deepseek-ai/schemastery'
 import { createPushState } from './webpush.js'
@@ -147,6 +147,13 @@ export const SettingsSchema = z.object({
   jobPush: z.boolean().default(true),
   /** Fill {question}/{summary} with conversation text in the fixed texts. */
   includeSummary: z.boolean().default(false),
+  /** Fully-muted workspaces, as an array of canonical directory paths (the
+   * workspace registry stores `fs.realpath`-normalized paths; the settings
+   * card writes exactly those). A session whose header cwd matches one of
+   * these paths gets NO automatic notification of any kind and its
+   * notify_user calls are dropped — full mute by design (user decision);
+   * the manual /test buttons are exempt. */
+  mutedWorkspaces: z.array(z.string()).default([]),
 })
 
 /** Body cap for the POST /test payload. */
@@ -254,6 +261,38 @@ export function errorMessage(error) {
 
 const skip = (reason) => ({ shouldNotify: false, title: '', body: '', reason })
 
+/** Whether a session's raw header cwd denotes the workspace at `mutedPath`.
+ * Muted paths are stored canonical (registry realpath canon), while a session
+ * header only promises an ABSOLUTE cwd — so compare resolved spellings
+ * first, then one best-effort realpath of the cwd to collapse symlinked
+ * spellings. A cwd whose directory disappeared settles for the resolve
+ * verdict; an absent cwd never matches (cannot attribute -> not muted, the
+ * session keeps notifying). */
+export function sameWorkspace(cwd, mutedPath) {
+  if (typeof cwd !== 'string' || cwd === '' || typeof mutedPath !== 'string' || mutedPath === '') return false
+  // Same directory by spelling: trailing slashes, `..`, and hand-written
+  // non-canonical muted paths (settings file edited by hand) all collapse
+  // in resolve.
+  if (resolve(cwd) === resolve(mutedPath)) return true
+  // Different spellings: realpath decides — a symlinked SPELLING of the
+  // workspace must still match the stored canonical path (registry canon),
+  // while a different directory resolves to its own canon and fails. The
+  // check cannot bail out on resolve inequality for the same reason: the
+  // two spellings differ until realpath collapses them.
+  try {
+    return realpathSync(cwd) === mutedPath
+  } catch {
+    // Deleted directory: no canon left; the resolve verdict above stands.
+    return false
+  }
+}
+
+/** Any of the muted workspace paths matches the cwd. */
+export function isMutedWorkspace(cwd, mutedWorkspaces) {
+  if (!Array.isArray(mutedWorkspaces)) return false
+  return mutedWorkspaces.some((p) => sameWorkspace(cwd, p))
+}
+
 // --- notification texts: defaults + user-override templates ------------------
 //
 // Users override these through the Settings → 通知推送 card; an override is a
@@ -346,15 +385,25 @@ export function renderTexts(kind, input, cfg) {
  *   now             current epoch ms
  *   lastSent        epoch ms of the previous automatic push (0 for none)
  *   delegationDepth session header's delegationDepth (undefined = top level)
+ *   cwd             session header's cwd (workspace attribution for the mute)
  *   summary         already-extracted turn summary  ('turn-end')
  *   toolName        tool awaiting approval          ('approval')
  *   question        pending question text           ('question')
  * @param {object} cfg { turnEndEnabled, debounceMs, includeSummary,
- *                       approvalEnabled?, questionEnabled?, texts? }
+ *                       approvalEnabled?, questionEnabled?, texts?,
+ *                       mutedWorkspaces? }
  * @returns {{shouldNotify: boolean, title: string, body: string, reason: string}}
  */
 export function decideNotification(input, cfg) {
   const debounced = input.now - input.lastSent < cfg.debounceMs
+
+  // Workspace mute FIRST, before every kind branch and the debounce: a muted
+  // workspace is a FULL mute (user decision) — even the needs-you legs and
+  // the debounce bookkeeping stay out of it. Sessions without a cwd cannot
+  // be attributed and keep notifying.
+  if (Array.isArray(cfg.mutedWorkspaces) && cfg.mutedWorkspaces.length > 0 && isMutedWorkspace(input.cwd, cfg.mutedWorkspaces)) {
+    return skip('workspace-muted')
+  }
 
   switch (input.kind) {
     // Event leg. Exempt from the debounce on purpose: "a tool is waiting for
@@ -634,6 +683,38 @@ export function handleVapid(pushState, req, res) {
   responseJson(res, 200, { ok: true, publicKey: pushState.vapidPublicKey(), subscriptions: pushState.subscriptions().length })
 }
 
+/** GET {BASE}/workspaces — the workspace list the settings card offers for
+ * per-workspace muting. Sourced from ctx.workspaceRegistry (dsh-workspace,
+ * part of the Web composition): the SAME records the sidebar shows, in
+ * registry order, paths already canonicalized (fs.realpath canon) — exactly
+ * what mutedWorkspaces stores. Read-only, no secrets; the login gate (when
+ * present) covers auth like every other route. Without the registry
+ * (Electron-style compositions) the card shows its empty-state hint and the
+ * mute can still be driven by hand-editing the settings document.
+ * @param {Function|null} getRegistry live accessor for the registry service.
+ */
+export function handleWorkspaces(getRegistry, req, res) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    res.setHeader('Allow', 'GET, HEAD')
+    responseJson(res, 405, { ok: false, error: { code: 'method-not-allowed', message: 'Use GET' } })
+    return
+  }
+  const registry = typeof getRegistry === 'function' ? getRegistry() : null
+  if (registry === null) {
+    responseJson(res, 200, { ok: true, registry: false, workspaces: [] })
+    return
+  }
+  let workspaces = []
+  try {
+    workspaces = registry.list().map((w) => ({ id: w.id, title: w.title, path: w.path }))
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    responseJson(res, 500, { ok: false, error: { code: 'registry-error', message } })
+    return
+  }
+  responseJson(res, 200, { ok: true, registry: true, workspaces })
+}
+
 // ---------------------------------------------------------------------------
 // Raw index.html transform (webServer.tapIndex): the escape hatch for the
 // manifest link, which no structured injection row can EDIT (rows only
@@ -697,8 +778,10 @@ async function loadAsset(name) {
  * The single prefix route: static assets + push management + test.
  * @param {ReturnType<typeof createPushState>} pushState
  * @param {Function} getCfg live-settings accessor for the /test preview.
+ * @param {Function} [getRegistry] live workspaceRegistry accessor for
+ *   /workspaces (optional so older 4-arg callers keep working).
  */
-export async function handleRoute(pushState, getCfg, req, res) {
+export async function handleRoute(pushState, getCfg, req, res, getRegistry) {
   const url = new URL(req.url ?? '/', 'http://dsh.internal')
   const rel = url.pathname.slice(BASE.length).replace(/^\/+/, '').replace(/\/+$/, '')
   try {
@@ -708,6 +791,7 @@ export async function handleRoute(pushState, getCfg, req, res) {
     if (rel === 'devices') return handleDevices(pushState, req, res)
     if (rel === 'devices/remove') return await handleDeviceRemove(pushState, req, res)
     if (rel === 'vapid') return handleVapid(pushState, req, res)
+    if (rel === 'workspaces') return handleWorkspaces(getRegistry, req, res)
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       res.setHeader('Allow', 'GET, HEAD')
       responseJson(res, 405, { ok: false, error: { code: 'method-not-allowed', message: 'Use GET' } })
@@ -761,9 +845,9 @@ const NOTIFY_DESCRIPTION =
   'Pushes are end-to-end encrypted (aes128gcm); the push provider only ever sees ciphertext. ' +
   NOTIFY_GUIDANCE +
   ' Calls are throttled (at most 1 per 60 seconds in this session, 20 total per hour across all sessions); ' +
-  'calling too often gets the call silently dropped. `title` must be a short, complete sentence that fits ' +
-  'on one notification line; `body` is optional detail shown when expanded. Returns how many devices ' +
-  'received it, or throttled:true when the rate limit dropped the call.'
+  'calling too often gets the call silently dropped. A call from a workspace the user muted in Settings → 通知推送 returns `muted: true` without sending. ' +
+  '`title` must be a short, complete sentence that fits on one notification line; `body` is optional detail shown when expanded. ' +
+  'Returns how many devices received it, or throttled:true when the rate limit dropped the call.'
 
 const NOTIFY_SECTION =
   'Reaching the user away from the window: this deployment can raise a notification on the user\'s ' +
@@ -783,8 +867,10 @@ const NOTIFY_TOOL_GLOBAL_MAX = 20
  * this package dependency-free (the registry validates again anyway).
  * @param {ReturnType<typeof createPushState>} pushState (or its null stand-in).
  * @param {object} gate the shared debounce arm.
+ * @param {object} cfg live config (`mutedWorkspaces` is read per call so the
+ * settings card's mute takes effect without re-registering the tool).
  */
-export function buildNotifyTool(pushState, gate) {
+export function buildNotifyTool(pushState, gate, cfg) {
   const lastSentBySession = new Map()
   let globalSends = []
 
@@ -824,11 +910,15 @@ export function buildNotifyTool(pushState, gate) {
         properties: {
           delivered: {
             type: 'integer',
-            description: 'Number of subscribed devices whose push service accepted the notification (HTTP 2xx). 0 when nothing is subscribed, delivery failed, or the call was throttled.',
+            description: 'Number of subscribed devices whose push service accepted the notification (HTTP 2xx). 0 when nothing is subscribed, delivery failed, the workspace is muted, or the call was throttled.',
           },
           throttled: {
             type: 'boolean',
             description: 'Present and true only when the rate limiter dropped the call instead of sending it.',
+          },
+          muted: {
+            type: 'boolean',
+            description: 'Present and true only when the initiating session\'s workspace is muted in Settings → 通知推送, so the call was dropped without broadcasting (and without spending rate-limit budget).',
           },
         },
         required: ['delivered'],
@@ -836,9 +926,11 @@ export function buildNotifyTool(pushState, gate) {
       render: (_args, value) => [
         {
           type: 'text',
-          text: value.throttled
-            ? 'notify_user: not sent — rate limit hit (max 1 per 60s per session, 20/hour total).'
-            : `notify_user: delivered to ${value.delivered} device(s).`,
+          text: value.muted
+            ? 'notify_user: not sent — this workspace is muted in the notification settings.'
+            : value.throttled
+              ? 'notify_user: not sent — rate limit hit (max 1 per 60s per session, 20/hour total).'
+              : `notify_user: delivered to ${value.delivered} device(s).`,
         },
       ],
     },
@@ -847,6 +939,13 @@ export function buildNotifyTool(pushState, gate) {
       if (exec.agent === undefined) throw new Error('notify_user requires an initiating agent')
       const sessionId = exec.agent.session.id
       const now = Date.now()
+      // Workspace mute: checked BEFORE the throttle so a muted call spends no
+      // rate-limit budget. Full mute (user decision) — the model leg from a
+      // muted workspace stays as silent as the event legs.
+      const cwd = exec.agent.session.header && exec.agent.session.header.cwd
+      if (cfg && isMutedWorkspace(typeof cwd === 'string' ? cwd : undefined, cfg.mutedWorkspaces)) {
+        return { delivered: 0, muted: true }
+      }
       if (isThrottled(sessionId, now)) return { delivered: 0, throttled: true }
       reserve(sessionId, now)
       // Counts toward the shared debounce clock so an automatic turn-end
@@ -904,6 +1003,8 @@ export function apply(ctx, config = {}) {
     notifyTool: config.notifyTool !== false,
     vapidSubject: str('vapidSubject'),
     push: config.push !== false,
+    // Fully-muted workspace paths (Settings → 通知推送 → 按工作区静音).
+    mutedWorkspaces: [],
   }
 
   // --- live user settings (Settings → 通知推送 card) -----------------------
@@ -922,6 +1023,9 @@ export function apply(ctx, config = {}) {
       cfg.goalEnabled = value.goalPush !== false
       cfg.jobEnabled = value.jobPush !== false
       cfg.includeSummary = value.includeSummary === true
+      cfg.mutedWorkspaces = Array.isArray(value.mutedWorkspaces)
+        ? value.mutedWorkspaces.filter((p) => typeof p === 'string' && p !== '')
+        : []
     }
     applyLive()
     scope.watch(applyLive)
@@ -977,16 +1081,23 @@ export function apply(ctx, config = {}) {
   // subagent children included — those notify here, they just never notify
   // on turn end. An approval still undecided after the grace window is
   // waiting on a human; `approval/decided` within the window cancels it.
+  // Every leg carries the session's header cwd so the workspace mute can
+  // attribute (and fully silence) the event.
+  const cwdOf = (session) => {
+    const header = session && session.header
+    return header && typeof header.cwd === 'string' ? header.cwd : undefined
+  }
   const armed = new Map()
   try {
-    ctx.on('session/event', (_session, event) => {
+    ctx.on('session/event', (session, event) => {
       if (!event || !event.data) return
       if (event.type === 'approval/asked') {
         const id = event.data.id
         const toolName = event.data.toolName
+        const cwd = cwdOf(session)
         const timer = setTimeout(() => {
           armed.delete(id)
-          fire({ kind: 'approval', toolName, id })
+          fire({ kind: 'approval', toolName, id, cwd })
         }, cfg.approvalGraceMs)
         if (typeof timer.unref === 'function') timer.unref()
         armed.set(id, timer)
@@ -1005,12 +1116,13 @@ export function apply(ctx, config = {}) {
           kind: 'question',
           question: isPlan ? planExcerpt(event.data.arguments) : pendingQuestionText(event.data.arguments),
           plan: isPlan,
+          cwd: cwdOf(session),
         })
       } else if (event.type === 'tool/call' && event.data.name === GOAL_TOOL) {
         // `blocked` is the explicit needs-you state; other update_goal
         // actions (complete/edit/...) are routine and stay quiet.
         const reason = goalBlockedReason(event.data.arguments)
-        if (reason !== null) fire({ kind: 'goal', reason })
+        if (reason !== null) fire({ kind: 'goal', reason, cwd: cwdOf(session) })
       }
     })
   } catch (e) {
@@ -1027,7 +1139,7 @@ export function apply(ctx, config = {}) {
       const session = payload && payload.agent && payload.agent.session
       const header = session && session.header
       if (!header || (header.delegationDepth ?? 0) !== 0) return
-      fire({ kind: 'error', error: errorMessage(payload.error) })
+      fire({ kind: 'error', error: errorMessage(payload.error), cwd: cwdOf(session) })
     })
   } catch (e) {
     console.warn(`[dsh-pwa-notify] cannot listen on "agent/error": ${String((e && e.message) || e)}`)
@@ -1039,10 +1151,17 @@ export function apply(ctx, config = {}) {
   ctx.inject(['jobs'], (jobsCtx) => {
     jobsCtx.effect(
       () =>
-        jobsCtx.jobs.onJobDone((snapshot) => {
+        jobsCtx.jobs.onJobDone((snapshot, owner) => {
           if (!snapshot) return
           if (snapshot.status !== 'completed' && snapshot.status !== 'failed') return
-          fire({ kind: 'job', label: snapshot.label || snapshot.id || '任务', status: snapshot.status })
+          // The owner agent attributes the job to a workspace for the mute;
+          // an unowned job cannot be attributed and keeps notifying.
+          fire({
+            kind: 'job',
+            label: snapshot.label || snapshot.id || '任务',
+            status: snapshot.status,
+            cwd: cwdOf(owner && owner.session),
+          })
         }),
       'dsh-pwa-notify: job settlement',
     )
@@ -1062,6 +1181,7 @@ export function apply(ctx, config = {}) {
         kind: 'turn-end',
         delegationDepth: header.delegationDepth,
         summary: cfg.includeSummary ? turnSummary(session.events, payload && payload.turn) : '',
+        cwd: cwdOf(session),
       })
     })
   } catch (e) {
@@ -1069,6 +1189,24 @@ export function apply(ctx, config = {}) {
   }
 
   // --- PWA assets + push management + test routes ----------------------------
+  // Workspace registry (dsh-workspace, Web composition): the settings card's
+  // mute list source. Held by reference, not ctx.get at route time — inject
+  // defers until the service is up and nulls it back on teardown, and a
+  // missing registry degrades to the card's empty state.
+  let workspaceRegistry = null
+  try {
+    ctx.inject(['workspaceRegistry'], (regCtx) => {
+      regCtx.effect(() => {
+        workspaceRegistry = regCtx.workspaceRegistry
+        return () => {
+          workspaceRegistry = null
+        }
+      }, 'dsh-pwa-notify: workspace registry ref')
+    })
+  } catch (e) {
+    console.warn(`[dsh-pwa-notify] cannot observe "workspaceRegistry": ${String((e && e.message) || e)}`)
+  }
+
   ctx.inject(['webServer'], (webCtx) => {
     webCtx.effect(
       () =>
@@ -1079,7 +1217,7 @@ export function apply(ctx, config = {}) {
             // Push disabled: /vapid and /subscribe answer with an explicit
             // error, /test reports sent:0 — the route table stays uniform.
             // getCfg reads live settings for the /test template preview.
-            handleRoute(pushState !== null ? pushState : nullPushState(), () => cfg, req, res),
+            handleRoute(pushState !== null ? pushState : nullPushState(), () => cfg, req, res, () => workspaceRegistry),
         }),
       'dsh-pwa-notify: pwa routes',
     )
@@ -1119,7 +1257,7 @@ export function apply(ctx, config = {}) {
       if (!toolsCtx.tools) return
       toolsCtx.effect(() => {
         try {
-          return toolsCtx.tools.register(buildNotifyTool(pushState, gate))
+          return toolsCtx.tools.register(buildNotifyTool(pushState, gate, cfg))
         } catch (e) {
           // A name collision with another deployment's notify_user tool must
           // not take the plugin row down — warn and stay quiet.

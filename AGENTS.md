@@ -24,11 +24,12 @@
 - **推送是唯一通知通道**（用户决定移除轮询兜底）：事件腿统一走 `apply` 里的 `emit()`（fire-and-forget 广播）；`notify_user` 工具与 `/test` 直接 `await pushState.broadcast()` 拿真实 2xx 送达数。不要 reintroduce 缓冲/轮询通道——一条推送失败即丢失是**已接受的取舍**，设备下次打开应用时自动重订阅自愈。
 - **SW 永远不加 fetch handler**：DSH 的 JS/CSS 每次部署都变且文件名不变，任何缓存策略都会造成「新 DOM + 旧 CSS」（dsh-zen-remote sw v2→v3 的事故复盘）。本插件的 SW 只做通知展示（push 事件 + showNotification）和点击聚焦。
 - **通知策略保持「需要你才响」**：**免防打扰压制**的腿 = 等授权 / 等回答（**含计划审阅**，exit_plan_mode 与 ask_user_question 共用 userQuestions.ask() 阻塞通道，按 tool/call 名字白名单识别）/ 回合出错（agent/error，仅顶层会话）/ 目标受阻（update_goal action=blocked）；**受压制**的腿 = 回合结束（默认关）与后台任务结算（默认开）。设置卡片可关各腿。子代理的完成/出错永远不推。默认语义源自 dsh-zen-remote（1.0.3 起回合结束默认不推），不要「顺手改默认值」。
+- **工作区静音是完全静音（v0.8.4）**：设置键 `mutedWorkspaces`（canonical 路径数组）命中会话 `header.cwd` 时，`decideNotification` 在**一切分支与 debounce 之前**返回 `workspace-muted`——含等授权/等回答与 `notify_user`（工具侧在节流前丢弃并返回 `muted:true`，不占限流额度）；`/test` 是手动预览，永不静音。匹配用 `sameWorkspace`（resolve 等值 + best-effort realpath 折叠 symlink 拼写）；无 cwd 的会话、无 owner 的后台任务**不静音**。卡片列表来自 `GET /workspaces` → `ctx.inject(['workspaceRegistry'])`（侧边栏同一份 registry；无该服务的组合显示空态，手写设置文档仍生效）。
 - **等待类工具按名字白名单识别**：`ASK_USER_TOOL` / `EXIT_PLAN_TOOL`（再加 GOAL_TOOL 的 blocked 动作）。userQuestions 服务本身没有事件面（只有 ask() API），全 DSH 的 asker 只有这两个——**上游新增等待类工具时必须扩这个名单**，否则静默漏通知。
 - **决策层必须是纯函数**：`decideNotification` / `turnSummary` / `assistantText` / `pendingQuestionText` 全部纯函数导出，测试不经真实会话（建真实会话耗 token，是工作区硬约束）。宿主侧接线（`apply`）只做薄封装。
 - **工具名是 `notify_user` 不是 `push_notify`**：刻意与 dsh-zen-remote 区分（避免同装冲突）。注册包 try/catch：与部署里同名工具撞名时降级为告警，不许把插件行带崩。
 - **schemastery 是正式 dependencies**：开发目录跑一次 `npm install` 装真实副本（registry 可达），打包安装的副本由 profile 解析同一依赖。**不要**手工往 node_modules 里放 symlink 代替安装——`npm pack`/npm 脚本加载依赖树时会按 package.json 收敛 node_modules，手工 symlink 会被清掉（踩过：symlink 蒸发 → 测试全挂 ERR_MODULE_NOT_FOUND）。
-- **设置是双层的（v0.8.0 起开关-only）**：用户层走 `settings.register('dsh-pwa-notify', SettingsSchema)`（六开关 + includeSummary，**无文案模板**——自定义功能已按用户要求移除，文案为 `DEFAULT_TEXTS` 固定），`scope.watch` 热更新 `apply` 里的 `cfg`；行配置只提供静态项（grace/debounce/subject/push/tool）和 `turnEndPush`/`includeSummary` 的 base 初始值。`renderTexts` 是纯函数，`decideNotification` 和 `/test` 预览共用。
+- **设置是双层的（v0.8.0 起开关-only）**：用户层走 `settings.register('dsh-pwa-notify', SettingsSchema)`（六开关 + includeSummary + `mutedWorkspaces` 路径数组（v0.8.4），**无文案模板**——自定义功能已按用户要求移除，文案为 `DEFAULT_TEXTS` 固定），`scope.watch` 热更新 `apply` 里的 `cfg`；行配置只提供静态项（grace/debounce/subject/push/tool）和 `turnEndPush`/`includeSummary` 的 base 初始值。`renderTexts` 是纯函数，`decideNotification` 和 `/test` 预览共用。
 - **/test 预览必须按当前实时配置渲染**：不强制 includeSummary——测试按钮收到什么，真实推送就是什么（用户明确要求）。改预览逻辑不许重新引入「强制摘要」的覆盖。
 - **推送开启入口只在设置卡片**（v0.8.0 起）：无首载弹卡、无 ask() API；设置卡片「推送状态」区块是唯一开启入口，已订阅置灰。不要重新引入页面弹卡。
 - **index.html 改写走 tapIndex，注入走 index-inject**：要**编辑既有标签**的改动只能用 `webServer.tapIndex`（结构化注入行只会追加）；tapIndex 在注入之后运行，`stripExistingManifestLink` 必须保留自己的 `/_dsh/pwa-notify/manifest.json`（先注入=第一个=被浏览器采用）。**不要**再尝试 viewport-fit=cover / 安全区 padding 的全屏沉浸方案——v0.5.0 做过、v0.6.2 整体回退：fixed 定位的应用骨架不吃 body padding，iOS 首帧 env() 仍是 0，实测整个 UI 顶到状态栏底下。**v0.8.1 起本插件不再向页面注入任何 `<style>`**——曾保留的两条无布局影响规则（overscroll 防误刷新、输入框 ≥16px 防聚焦缩放）已按用户要求移除，移交其 UI 类插件承接；不要在本插件里重新加回通用界面行为 CSS。
@@ -54,7 +55,7 @@
 ## 4. 命令
 
 ```sh
-npm test        # node --test：31 个用例（策略、开关、路由、index 改写、RFC 8291 向量、VAPID JWT、推送广播、客户端设置卡片点击冒烟）
+npm test        # node --test：37 个用例（策略、开关、工作区静音、路由、index 改写、RFC 8291 向量、VAPID JWT、推送广播、客户端设置卡片点击冒烟）
 npm run icons   # 重新生成 pwa/icons/*.png
 ```
 

@@ -386,6 +386,42 @@ window.__ModuleLoader__.load({
       }
       react.useEffect(refreshSubs, [])
 
+      // Workspace list for the per-workspace mute (same records as the
+      // sidebar, via the host's workspaceRegistry). null = not loaded yet.
+      var wsState = react.useState(null)
+      var spaces = wsState[0]
+      var setSpaces = wsState[1]
+      var refreshSpaces = function () {
+        fetch(BASE + '/workspaces', { credentials: 'same-origin' })
+          .then(function (r) { return r.json() })
+          .then(function (d) { if (d && d.ok) setSpaces(d) })
+          .catch(function () {})
+      }
+      react.useEffect(refreshSpaces, [])
+
+      function isMutedPath(path, muted) {
+        // Paths come from the host canonicalized on both sides; a plain
+        // includes() is enough in the browser (no fs there to re-canonical).
+        for (var i = 0; i < muted.length; i++) if (muted[i] === path) return true
+        return false
+      }
+
+      function toggleWorkspaceMute(path, checked) {
+        setMsg(null)
+        // Read the LIVE snapshot at click time, not the render-time `v`:
+        // two quick toggles back-to-back must not have the second compute
+        // from the pre-first-write array (it would silently drop the first).
+        var snap = scope.getSnapshot()
+        var val = snap && snap.status === 'ready' ? snap.value : null
+        var muted = val && Array.isArray(val.mutedWorkspaces) ? val.mutedWorkspaces : []
+        var next = muted.filter(function (p) { return p !== path })
+        if (checked) next = [path].concat(next)
+        scope.set('mutedWorkspaces', next).then(
+          function () { setMsg({ kind: 'ok', text: checked ? '该工作区已静音，即时生效。' : '该工作区已恢复推送。' }) },
+          function () { setMsg({ kind: 'err', text: '保存失败，请重试。' }) },
+        )
+      }
+
       function removeDevice(endpoint) {
         if (!window.confirm('删除这台设备的推送订阅？若该设备仍在使用，它下次打开应用会自动重新订阅。')) return
         setMsg(null)
@@ -497,6 +533,38 @@ window.__ModuleLoader__.load({
             '通知带对话摘要（填入 {question} / {summary}）'
           ),
           h('p', { className: 'pwn-hint' }, '子代理的回合完成永远不推。')
+        ) : null,
+        ready ? h('div', { className: 'pwn-field' },
+          h('label', { className: 'pwn-label' }, '按工作区静音'),
+          spaces === null
+            ? h('p', { className: 'pwn-hint' }, '读取中…')
+            : !spaces.registry || spaces.workspaces.length === 0
+              ? h('p', { className: 'pwn-hint' }, '没有已登记的工作区（在侧边栏创建工作区后此处可选；也可在设置文件 dsh-pwa-notify 命名空间手写 mutedWorkspaces 路径数组）。')
+              : spaces.workspaces.map(function (w) {
+                  var mutedNow = v ? isMutedPath(w.path, v.mutedWorkspaces || []) : false
+                  return h('div', { key: w.id, className: 'pwn-row', style: { justifyContent: 'space-between' } },
+                    h('div', { style: { display: 'flex', flexDirection: 'column', gap: '2px', minWidth: 0, flex: '1' } },
+                      h('span', { style: { fontSize: '13px', color: 'var(--dsw-alias-label-primary,#c2c8d0)' } }, w.title),
+                      h('span', { className: 'pwn-hint', style: { margin: 0, wordBreak: 'break-all' } }, w.path),
+                    ),
+                    h('label', { className: 'pwn-check', style: { flexShrink: 0 } },
+                      h('input', {
+                        type: 'checkbox',
+                        checked: mutedNow,
+                        onChange: function (e) { toggleWorkspaceMute(w.path, e.target.checked) },
+                      }),
+                      '静音',
+                    ),
+                  )
+                }),
+          h('p', { className: 'pwn-hint' },
+            '静音是彻底的：该工作区的等授权、等回答、出错、受阻、任务结束、回合完成通知与 notify_user 调用都不再推送；「测试发送」不受影响。'
+          ),
+          spaces !== null && spaces.registry && spaces.workspaces.length > 0
+            ? h('div', { className: 'pwn-row' },
+                h('button', { type: 'button', className: 'pwn-btn-ghost', onClick: refreshSpaces }, '刷新工作区')
+              )
+            : null,
         ) : null,
         ready ? h('div', { className: 'pwn-field' },
           h('label', { className: 'pwn-label' }, '测试发送'),
