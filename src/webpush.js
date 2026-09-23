@@ -217,7 +217,7 @@ function readStateFile(file) {
  */
 export function createPushState(opts = {}) {
   const stateFile = opts.stateFile
-  const subject = opts.subject || 'mailto:admin@localhost'
+  const subject = opts.subject || 'mailto:admin@example.com' // Apple 403s @localhost
   const doFetch = opts.fetchImpl ?? globalThis.fetch
   if (typeof doFetch !== 'function') throw new Error('no fetch implementation available')
 

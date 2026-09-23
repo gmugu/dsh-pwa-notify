@@ -104,9 +104,12 @@ export const DEFAULT_CONFIG = {
   includeSummary: false,
   /** Register the notify_user model tool + prompt guidance. */
   notifyTool: true,
-  /** RFC 8292 VAPID contact. Apple REJECTS the placeholder on iOS — set a
-   * real mailto: or https: URL (zen-remote ships the same requirement). */
-  vapidSubject: 'mailto:admin@localhost',
+  /** RFC 8292 VAPID contact. Apple rejects `mailto:*@localhost` with
+   * 403 BadJwtToken (verified against web.push.apple.com; FCM accepts it,
+   * which is why desktop Chrome works while iOS silently fails). Changing
+   * the subject does NOT invalidate subscriptions — only the VAPID keypair
+   * does. example.com is IANA-reserved and accepted by APNs. */
+  vapidSubject: 'mailto:admin@example.com',
   /** Web Push switch. Off leaves the local poll channel only. */
   push: true,
 }
@@ -165,7 +168,7 @@ export const Config = z.object({
   approvalGraceMs: z.number().min(0).default(DEFAULT_CONFIG.approvalGraceMs),
   /** Minimum spacing between two automatic turn-end notifications. */
   debounceMs: z.number().min(0).default(DEFAULT_CONFIG.debounceMs),
-  /** RFC 8292 VAPID contact. Apple REJECTS the placeholder on iOS. */
+  /** RFC 8292 VAPID contact — must not be `mailto:*@localhost` (Apple 403s it). */
   vapidSubject: z.string().default(DEFAULT_CONFIG.vapidSubject),
   /** Register the notify_user model tool + prompt guidance. */
   notifyTool: z.boolean().default(true),
