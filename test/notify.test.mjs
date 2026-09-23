@@ -25,6 +25,7 @@ import {
   errorMessage,
   assistantText,
   turnSummary,
+  eventsOf,
   pendingQuestionText,
   sameOriginPost,
   sameWorkspace,
@@ -110,6 +111,18 @@ test('turnSummary prefers final text, falls back to tool name, stops at turn bou
   assert.equal(turnSummary('nope', 1), '')
 })
 
+test('eventsOf reads snapshotEvents() on new DSH, .events on old, [] otherwise', () => {
+  const log = [{ type: 'tool/call', data: { turn: 1, name: 'bash' } }]
+  // DSH 0.1.5+ Session: snapshotEvents() only (the .events property is gone).
+  assert.equal(eventsOf({ snapshotEvents: () => log }), log)
+  // Pre-0.1.5 Session: plain array property.
+  assert.equal(eventsOf({ events: log }), log)
+  // snapshotEvents wins when both exist; a shapeless object/null degrades to [].
+  assert.equal(eventsOf({ snapshotEvents: () => log, events: ['other'] }), log)
+  assert.deepEqual(eventsOf({}), [])
+  assert.deepEqual(eventsOf(null), [])
+})
+
 test('pendingQuestionText parses best-effort', () => {
   assert.equal(pendingQuestionText('{"questions":[{"question":"哪个？"}]}'), '哪个？')
   assert.equal(pendingQuestionText('not json'), '')
@@ -163,7 +176,13 @@ test('decideNotification: error/goal exempt from debounce, job debounced; toggle
   )
   assert.equal(decideNotification({ ...base, kind: 'error' }, { ...CFG, errorEnabled: false }).reason, 'error-disabled')
   assert.equal(decideNotification({ ...base, kind: 'goal' }, { ...CFG, goalEnabled: false }).reason, 'goal-disabled')
-  assert.equal(decideNotification({ now: 60000, kind: 'job' }, { ...CFG, jobEnabled: false }).reason, 'job-disabled')
+  // job legs are separately togglable per settle status
+  const jobCfg = (over) => ({ ...CFG, jobDoneEnabled: true, jobFailEnabled: true, ...over })
+  assert.equal(decideNotification({ now: 60000, kind: 'job', status: 'completed' }, jobCfg({ jobDoneEnabled: false })).reason, 'job-done-disabled')
+  assert.equal(decideNotification({ now: 60000, kind: 'job', status: 'failed' }, jobCfg({ jobFailEnabled: false })).reason, 'job-fail-disabled')
+  // disabling one leg leaves the other on
+  assert.equal(decideNotification({ now: 60000, kind: 'job', status: 'failed' }, jobCfg({ jobDoneEnabled: false })).shouldNotify, true)
+  assert.equal(decideNotification({ now: 60000, kind: 'job', status: 'completed' }, jobCfg({ jobFailEnabled: false })).shouldNotify, true)
 })
 
 test('renderTexts: question leg distinguishes plan review; new kinds render vars ungated', () => {
@@ -287,9 +306,14 @@ test('sameWorkspace: spelling, symlinks, foreign dirs, absent cwd', () => {
     // hand-written non-canonical muted path against a clean cwd
     assert.equal(sameWorkspace(canon, join(dir, 'ws')), true)
     // symlinked spelling collapses onto the stored canonical path
+    // (skipped where symlink creation is denied — e.g. restricted sandbox tokens)
     const link = join(dir, 'link')
-    symlinkSync(ws, link)
-    assert.equal(sameWorkspace(link, canon), true)
+    try {
+      symlinkSync(ws, link)
+      assert.equal(sameWorkspace(link, canon), true)
+    } catch (error) {
+      assert.match(String(error?.code), /^EPERM$|^EACCES$|^ENOSYS$|^EINVAL$/)
+    }
     // a different directory never matches
     const other = join(dir, 'other')
     mkdirSync(other)

@@ -459,6 +459,19 @@ window.__ModuleLoader__.load({
         )
       }
 
+      // Job legs carry a legacy master (jobPush, v0.8 name): a stored
+      // jobPush=false mutes both, so flipping a leg ON must also lift it.
+      function saveJobToggle(key, checked) {
+        setMsg(null)
+        var lift = checked && v && v.jobPush === false ? scope.set('jobPush', true) : Promise.resolve()
+        lift
+          .then(function () { return scope.set(key, checked) })
+          .then(
+            function () { setMsg({ kind: 'ok', text: '已保存，即时生效。' }) },
+            function () { setMsg({ kind: 'err', text: '保存失败，请重试。' }) },
+          )
+      }
+
       function sendKindTest(kind) {
         setMsg(null)
         postTest(kind).then(function (r) {
@@ -525,8 +538,12 @@ window.__ModuleLoader__.load({
             '目标受阻时推送'
           ),
           h('label', { className: 'pwn-check' },
-            h('input', { type: 'checkbox', checked: v && v.jobPush !== false, onChange: function (e) { saveToggle('jobPush', e.target.checked) } }),
-            '后台任务结束时推送（完成/失败）'
+            h('input', { type: 'checkbox', checked: v && v.jobPush !== false && v.jobDonePush !== false, onChange: function (e) { saveJobToggle('jobDonePush', e.target.checked) } }),
+            '后台任务完成时推送'
+          ),
+          h('label', { className: 'pwn-check' },
+            h('input', { type: 'checkbox', checked: v && v.jobPush !== false && v.jobFailPush !== false, onChange: function (e) { saveJobToggle('jobFailPush', e.target.checked) } }),
+            '后台任务失败时推送'
           ),
           h('label', { className: 'pwn-check' },
             h('input', { type: 'checkbox', checked: v && v.includeSummary === true, onChange: function (e) { saveToggle('includeSummary', e.target.checked) } }),
@@ -610,7 +627,11 @@ window.__ModuleLoader__.load({
 
     function applySettings(ctx) {
       ensureSettingsStyle()
-      var scope = ctx.settingsScope.bind({ namespace: 'dsh-pwa-notify' })
+      // DSH ≥ 0.1.7: settingsScope is gone; configForms serves one live form
+      // per Host profile entry (getSnapshot/subscribe/set — same face the
+      // card already consumes). status 'unavailable' when this host entry
+      // carries no Config schema.
+      var scope = ctx.configForms.get('dsh-pwa-notify')
       ctx.slots.inject('settings.section', function () {
         return ctx.slots.register(
           {
@@ -626,7 +647,7 @@ window.__ModuleLoader__.load({
     }
 
     exports.apply = apply
-    exports.inject = ['slots', 'settingsScope']
+    exports.inject = ['slots', 'configForms']
     return module.exports
   },
 })

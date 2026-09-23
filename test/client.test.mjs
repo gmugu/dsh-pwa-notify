@@ -108,7 +108,7 @@ function applyToSettings(mod) {
       inject: (name, body) => { slot = body() },
       register: (config, comp) => ({ config, comp }),
     },
-    settingsScope: { bind: () => () => ({}) },
+    configForms: { get: () => ({ getSnapshot: () => ({ status: 'unavailable' }), subscribe: () => () => {}, set: async () => {} }) },
     effect: (fn) => {
       const cleanup = fn()
       return typeof cleanup === 'function' ? cleanup : () => {}
@@ -154,7 +154,7 @@ test('开启通知 click with default permission prompts then POSTs subscribe (v
   const boot = bootClient({ perm: 'default', promptResult: 'granted' })
   const { mod, sandbox, calls } = boot
   assert.equal(typeof mod.apply, 'function')
-  assert.deepEqual(mod.inject, ['slots', 'settingsScope'])
+  assert.deepEqual(mod.inject, ['slots', 'configForms'])
 
   const slot = applyToSettings(mod)
   assert.equal(slot.config.name, 'settings.section')

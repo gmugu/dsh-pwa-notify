@@ -12,9 +12,9 @@
 
 `dsh-pwa-notify` 是 DSH 的一个 **bundle 插件**（一个包，两半代码，对用户是一个插件）：
 
-- **host 半边** `src/index.js`（插件行 `dsh-pwa-notify`）：PWA 静态文件路由、事件监听（`session/event` 的授权/提问/计划/目标 + `agent/turn-stopping` + `agent/error` + `jobs.onJobDone`）、通知决策（纯函数）+ Web Push 广播、`notify_user` 模型工具、settings 命名空间、`webserver/index-inject` 注入与 tapIndex 改写。
+- **host 半边** `src/index.js`（插件行 `dsh-pwa-notify`）：PWA 静态文件路由、事件监听（`session/event` 的授权/提问/计划/目标 + `agent/turn-stopping` + `agent/error` + `jobs.events.subscribe` 的 settled 事件）、通知决策（纯函数）+ Web Push 广播、`notify_user` 模型工具、Config schema（volatile 设置面）、`webserver/index-inject` 注入与 tapIndex 改写。
 - **协议半边** `src/webpush.js`：VAPID 密钥（RFC 8292 ES256）、aes128gcm 载荷加密（RFC 8291）、订阅状态持久化与广播（404/410 自动清理）。
-- **浏览器半边** `src/client.js`（同一插件行，经 `dsh.client` 发现）：Service Worker 注册、通知授权卡片、推送订阅与回访 resync（通知展示全在 SW，页面自身无展示路径），以及 Settings「通知推送」卡片（React，settings.section 槽 + settingsScope）。
+- **浏览器半边** `src/client.js`（同一插件行，经 `dsh.client` 发现）：Service Worker 注册、通知授权卡片、推送订阅与回访 resync（通知展示全在 SW，页面自身无展示路径），以及 Settings「通知推送」卡片（React，settings.section 槽 + configForms 表单）。
 
 ## 2. 硬约束（改动前必读）
 
@@ -27,9 +27,12 @@
 - **工作区静音是完全静音（v0.8.4）**：设置键 `mutedWorkspaces`（canonical 路径数组）命中会话 `header.cwd` 时，`decideNotification` 在**一切分支与 debounce 之前**返回 `workspace-muted`——含等授权/等回答与 `notify_user`（工具侧在节流前丢弃并返回 `muted:true`，不占限流额度）；`/test` 是手动预览，永不静音。匹配用 `sameWorkspace`（resolve 等值 + best-effort realpath 折叠 symlink 拼写）；无 cwd 的会话、无 owner 的后台任务**不静音**。卡片列表来自 `GET /workspaces` → `ctx.inject(['workspaceRegistry'])`（侧边栏同一份 registry；无该服务的组合显示空态，手写设置文档仍生效）。
 - **等待类工具按名字白名单识别**：`ASK_USER_TOOL` / `EXIT_PLAN_TOOL`（再加 GOAL_TOOL 的 blocked 动作）。userQuestions 服务本身没有事件面（只有 ask() API），全 DSH 的 asker 只有这两个——**上游新增等待类工具时必须扩这个名单**，否则静默漏通知。
 - **决策层必须是纯函数**：`decideNotification` / `turnSummary` / `assistantText` / `pendingQuestionText` 全部纯函数导出，测试不经真实会话（建真实会话耗 token，是工作区硬约束）。宿主侧接线（`apply`）只做薄封装。
+- **会话日志读取走 `eventsOf`（跨 DSH 代际）**：DSH 0.1.5（alpha.2）起 `Session` 移除了 `.events` 属性、只剩 `snapshotEvents()`——turn-end 摘要一律经 `eventsOf(session)` 取日志（新方法优先、旧属性兜底、两者皆无返回 []）。不要在 `apply` 里直接摸 `session.events`（新版拿到 undefined，摘要静默变空）。
+- **兼容版本标注在 `peerDependencies`（生态惯例）**：对 cordis + 本插件实际消费的 `@deepseek-ai/dsh-*` 运行时包逐一声明（对照 dsh-better-sidebar 的做法），下限 = 实测通过的宿主版本（当前 `^0.1.7-alpha.2`）。每次对新版 DSH 做完适配审计，必须同步：peer 范围、README「兼容性」一节的实测表；修了 API 断层时在 AGENTS 记一条硬约束（如上条 eventsOf）。
 - **工具名是 `notify_user` 不是 `push_notify`**：刻意与 dsh-zen-remote 区分（避免同装冲突）。注册包 try/catch：与部署里同名工具撞名时降级为告警，不许把插件行带崩。
 - **schemastery 是正式 dependencies**：开发目录跑一次 `npm install` 装真实副本（registry 可达），打包安装的副本由 profile 解析同一依赖。**不要**手工往 node_modules 里放 symlink 代替安装——`npm pack`/npm 脚本加载依赖树时会按 package.json 收敛 node_modules，手工 symlink 会被清掉（踩过：symlink 蒸发 → 测试全挂 ERR_MODULE_NOT_FOUND）。
-- **设置是双层的（v0.8.0 起开关-only）**：用户层走 `settings.register('dsh-pwa-notify', SettingsSchema)`（六开关 + includeSummary + `mutedWorkspaces` 路径数组（v0.8.4），**无文案模板**——自定义功能已按用户要求移除，文案为 `DEFAULT_TEXTS` 固定），`scope.watch` 热更新 `apply` 里的 `cfg`；行配置只提供静态项（grace/debounce/subject/push/tool）和 `turnEndPush`/`includeSummary` 的 base 初始值。`renderTexts` 是纯函数，`decideNotification` 和 `/test` 预览共用。
+- **设置走插件 Config schema 的 volatile 字段（v0.9 起，DSH ≥0.1.7）**：0.1.7 删除了 `settings.register`/`settingsScope`——设置服务现在直接描述每个 profile 条目自己 `Config` 里的 **volatile** 字段（热更新、不重挂载），非 volatile 字段是行级静态项。用户层六开关 + includeSummary + `mutedWorkspaces` 全部 `.volatile()` 声明在 `export const Config`；`apply` 里的 `cfg` 用 **getter + `vol()`** 每次读取时解包（volatile 字段经 schema 解析后是 observable 包装，`.get()` 取实时值）——**没有 watcher，别再找 scope.watch**。客户端用 `ctx.configForms.get('dsh-pwa-notify')`（getSnapshot/subscribe/set，快照 `{status:'loading'|'ready'|'unavailable', value}`），inject 名单是 `['slots','configForms']`。schemastery 需 ≥3.18.4（`.volatile()` 链式标记）。
+- **后台任务腿走 `jobs.events.subscribe`（v0.9 起，DSH ≥0.1.7）**：0.1.7 删除了 `jobs.onJobDone(snapshot, owner)`。现在是 `jobs.events.subscribe({owners:'all'}, listener)` 收 `settled` 事件：`event.job`（`{id,label,status,owner}`）里 **owner 是 SessionId 字符串**（不再是带 `.session` 的对象）——归因 cwd 要经 `ctx.inject(['sessions'])` 捕获 store、`sessions.get(owner)` 换回 session。只推 completed/failed，killed 是用户自己杀的。
 - **/test 预览必须按当前实时配置渲染**：不强制 includeSummary——测试按钮收到什么，真实推送就是什么（用户明确要求）。改预览逻辑不许重新引入「强制摘要」的覆盖。
 - **推送开启入口只在设置卡片**（v0.8.0 起）：无首载弹卡、无 ask() API；设置卡片「推送状态」区块是唯一开启入口，已订阅置灰。不要重新引入页面弹卡。
 - **index.html 改写走 tapIndex，注入走 index-inject**：要**编辑既有标签**的改动只能用 `webServer.tapIndex`（结构化注入行只会追加）；tapIndex 在注入之后运行，`stripExistingManifestLink` 必须保留自己的 `/_dsh/pwa-notify/manifest.json`（先注入=第一个=被浏览器采用）。**不要**再尝试 viewport-fit=cover / 安全区 padding 的全屏沉浸方案——v0.5.0 做过、v0.6.2 整体回退：fixed 定位的应用骨架不吃 body padding，iOS 首帧 env() 仍是 0，实测整个 UI 顶到状态栏底下。**v0.8.1 起本插件不再向页面注入任何 `<style>`**——曾保留的两条无布局影响规则（overscroll 防误刷新、输入框 ≥16px 防聚焦缩放）已按用户要求移除，移交其 UI 类插件承接；不要在本插件里重新加回通用界面行为 CSS。
@@ -55,7 +58,7 @@
 ## 4. 命令
 
 ```sh
-npm test        # node --test：37 个用例（策略、开关、工作区静音、路由、index 改写、RFC 8291 向量、VAPID JWT、推送广播、客户端设置卡片点击冒烟）
+npm test        # node --test：38 个用例（策略、开关、工作区静音、路由、index 改写、RFC 8291 向量、VAPID JWT、推送广播、客户端设置卡片点击冒烟）
 npm run icons   # 重新生成 pwa/icons/*.png
 ```
 

@@ -32,14 +32,20 @@ const STABLE_TGZ = join(PKG_DIR, 'dsh-pwa-notify-current.tgz')
 
 const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
 const doRestart = process.argv.includes('--restart')
+const skipTests = process.argv.includes('--no-test')
 
 function run(cmd, args, cwd, extraEnv = {}) {
+  // Windows: npm/pnpm are .cmd shims execFileSync cannot spawn directly —
+  // go through the shell there; bare execFileSync everywhere else.
+  const viaShell = process.platform === 'win32'
   console.log(`+ ${cmd} ${args.join(' ')}${cwd ? `  (in ${cwd})` : ''}`)
-  execFileSync(cmd, args, { cwd, stdio: 'inherit', env: { ...process.env, ...extraEnv } })
+  execFileSync(cmd, args, { cwd, stdio: 'inherit', shell: viaShell, env: { ...process.env, ...extraEnv } })
 }
 
-// 1. tests must pass — the tarball is the formal artifact
-run('npm', ['test'], ROOT)
+// 1. tests must pass — the tarball is the formal artifact.
+// (--no-test exists for sandboxed shells where node --test's piped child
+// spawns are denied; run the suite manually before using it.)
+if (!skipTests) run('npm', ['test'], ROOT)
 
 // 2. pack (cache/tmp pinned under the project so read-only HOMEs still work)
 const cacheDir = join(ROOT, '.npm-cache')

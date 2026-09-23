@@ -125,35 +125,52 @@ export const PUSH_POLICY = {
 }
 
 /**
- * User-facing settings namespace (`dsh-pwa-notify`), registered with the
- * settings service when one is mounted (the Web composition ships
- * dsh-settings-file): the Settings → 通知推送 card edits these live —
- * no restart. Flat keys on purpose (schemastery + settings UI both stay
- * simple); empty text = shipped default. `turnEndPush`/`includeSummary` are
- * seeded from the plugin-row config as their composition base layer.
+ * Plugin Config schema (DSH ≥ 0.1.7). The Settings service describes profile
+ * entries through the OWNING plugin's `Config` and lets the UI edit ONLY the
+ * `.volatile()` fields live (a volatile edit updates the running plugin's
+ * config in place — no remount); non-volatile fields stay row/static knobs.
+ * The Settings → 通知推送 card edits the volatile half below — `scope.watch`
+ * is gone, the host reads them through live getters (`vol()` in apply).
+ * Field names are unchanged from the v0.8 settings namespace.
  */
-export const SettingsSchema = z.object({
+export const Config = z.object({
   /** Notify when a tool approval is waiting on a human. */
-  approvalPush: z.boolean().default(true),
+  approvalPush: z.boolean().default(true).volatile(),
   /** Notify when an ask_user_question is pending. */
-  questionPush: z.boolean().default(true),
+  questionPush: z.boolean().default(true).volatile(),
   /** Notify on ordinary turn end. */
-  turnEndPush: z.boolean().default(false),
+  turnEndPush: z.boolean().default(false).volatile(),
   /** Notify when a turn errors out (agent/error, top-level sessions). */
-  errorPush: z.boolean().default(true),
+  errorPush: z.boolean().default(true).volatile(),
   /** Notify when a goal is marked blocked (update_goal action=blocked). */
-  goalPush: z.boolean().default(true),
-  /** Notify when a background job settles completed/failed (jobs.onJobDone). */
-  jobPush: z.boolean().default(true),
+  goalPush: z.boolean().default(true).volatile(),
+  /** Background jobs master (legacy v0.8 name): false mutes BOTH job legs. */
+  jobPush: z.boolean().default(true).volatile(),
+  /** Notify when a background job settles completed. */
+  jobDonePush: z.boolean().default(true).volatile(),
+  /** Notify when a background job settles failed. */
+  jobFailPush: z.boolean().default(true).volatile(),
   /** Fill {question}/{summary} with conversation text in the fixed texts. */
-  includeSummary: z.boolean().default(false),
+  includeSummary: z.boolean().default(false).volatile(),
   /** Fully-muted workspaces, as an array of canonical directory paths (the
    * workspace registry stores `fs.realpath`-normalized paths; the settings
    * card writes exactly those). A session whose header cwd matches one of
    * these paths gets NO automatic notification of any kind and its
    * notify_user calls are dropped — full mute by design (user decision);
    * the manual /test buttons are exempt. */
-  mutedWorkspaces: z.array(z.string()).default([]),
+  mutedWorkspaces: z.array(z.string()).default([]).volatile(),
+  // ---- static row knobs (not settings-editable) ---------------------------
+  /** How long an approval may sit undecided before it counts as waiting on a
+   * human. 5s covers a model answerer with margin (measured ~2.4s avg). */
+  approvalGraceMs: z.number().min(0).default(DEFAULT_CONFIG.approvalGraceMs),
+  /** Minimum spacing between two automatic turn-end notifications. */
+  debounceMs: z.number().min(0).default(DEFAULT_CONFIG.debounceMs),
+  /** RFC 8292 VAPID contact. Apple REJECTS the placeholder on iOS. */
+  vapidSubject: z.string().default(DEFAULT_CONFIG.vapidSubject),
+  /** Register the notify_user model tool + prompt guidance. */
+  notifyTool: z.boolean().default(true),
+  /** Web Push master switch. */
+  push: z.boolean().default(true),
 })
 
 /** Body cap for the POST /test payload. */
@@ -213,6 +230,16 @@ export function turnSummary(events, turn) {
     }
   }
   return lastTool ? `最后执行了 ${lastTool}` : ''
+}
+
+/** A session's append-only event log, across DSH generations. DSH 0.1.5
+ * (alpha.2 onward) removed the plain `.events` property in favor of
+ * `snapshotEvents()`; older versions only had the array. A session exposing
+ * neither (or a null stand-in) yields [] — turnSummary then degrades to its
+ * own fallbacks, exactly as before. */
+export function eventsOf(session) {
+  if (session && typeof session.snapshotEvents === 'function') return session.snapshotEvents()
+  return Array.isArray(session && session.events) ? session.events : []
 }
 
 /** First question of an ask_user_question call, from the raw argument string
@@ -435,10 +462,14 @@ export function decideNotification(input, cfg) {
       const texts = renderTexts('goal', input, cfg)
       return { shouldNotify: true, title: texts.title, body: texts.body, reason: 'goal-blocked' }
     }
-    // Background job settled (jobs.onJobDone, completed/failed). Nice-to-
-    // know family: subject to the debounce like turn-end.
+    // Background job settled (jobs settled event, completed/failed). Nice-to-
+    // know family: subject to the debounce like turn-end. Since the settings
+    // split, completed and failed are separately togglable; the legacy
+    // jobPush=false master (v0.8 name) still mutes both.
     case 'job': {
-      if (cfg.jobEnabled === false) return skip('job-disabled')
+      const failed = input.status === 'failed'
+      if (failed ? cfg.jobFailEnabled === false : cfg.jobDoneEnabled === false)
+        return skip(failed ? 'job-fail-disabled' : 'job-done-disabled')
       if (debounced) return skip('debounced')
       const texts = renderTexts('job', input, cfg)
       return { shouldNotify: true, title: texts.title, body: texts.body, reason: 'job-done' }
@@ -977,59 +1008,51 @@ export function buildNotifyTool(pushState, gate, cfg) {
  * @param {object} [config] plugin-row config (see DEFAULT_CONFIG).
  */
 export function apply(ctx, config = {}) {
+  // Volatile Config fields arrive as live observable wrappers after schema
+  // resolution (DSH ≥ 0.1.7 settings edits them in place); unwrap lazily and
+  // DEFENSIVELY so a raw (unresolved) config from an older loader still works.
+  const vol = (v) => (v !== null && typeof v === 'object' && typeof v.get === 'function' ? v.get() : v)
   const num = (key) => {
-    const v = config[key]
+    const v = vol(config[key])
     return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : DEFAULT_CONFIG[key]
   }
   const str = (key) => {
-    const v = config[key]
+    const v = vol(config[key])
     return typeof v === 'string' && v.trim() !== '' ? v.trim() : DEFAULT_CONFIG[key]
   }
   // Live configuration. The static knobs (grace/debounce/subject/push/tool)
-  // come from the plugin row; the user-owned knobs (toggles + text templates)
-  // are overwritten live from the settings namespace below the moment it
-  // mounts, and on every change thereafter.
+  // are row-level; the user-owned knobs (toggles + mute list) are volatile
+  // Config fields the Settings card edits live — every read below goes
+  // through a getter so an edit applies to the next event, no watcher.
   const cfg = {
-    approvalEnabled: true,
-    questionEnabled: true,
-    turnEndEnabled: config.turnEnd === true,
-    errorEnabled: true,
-    goalEnabled: true,
-    jobEnabled: true,
+    get approvalEnabled() { return vol(config.approvalPush) !== false },
+    get questionEnabled() { return vol(config.questionPush) !== false },
+    get turnEndEnabled() { return vol(config.turnEndPush) === true || config.turnEnd === true },
+    get errorEnabled() { return vol(config.errorPush) !== false },
+    get goalEnabled() { return vol(config.goalPush) !== false },
+    // Job legs: per-status toggles ANDed with the legacy jobPush master so an
+    // existing v0.8 jobPush=false stays fully off until the user re-enables.
+    get jobDoneEnabled() { return vol(config.jobPush) !== false && vol(config.jobDonePush) !== false },
+    get jobFailEnabled() { return vol(config.jobPush) !== false && vol(config.jobFailPush) !== false },
     approvalGraceMs: num('approvalGraceMs'),
     debounceMs: num('debounceMs'),
-    includeSummary: config.includeSummary === true,
+    get includeSummary() { return vol(config.includeSummary) === true || config.includeSummary === true },
     texts: {},
-    notifyTool: config.notifyTool !== false,
+    notifyTool: vol(config.notifyTool) !== false,
     vapidSubject: str('vapidSubject'),
-    push: config.push !== false,
+    push: vol(config.push) !== false,
     // Fully-muted workspace paths (Settings → 通知推送 → 按工作区静音).
-    mutedWorkspaces: [],
+    get mutedWorkspaces() {
+      const v = vol(config.mutedWorkspaces)
+      return Array.isArray(v) ? v.filter((p) => typeof p === 'string' && p !== '') : []
+    },
   }
 
   // --- live user settings (Settings → 通知推送 card) -----------------------
-  // Registered when the settings service mounts (the Web composition ships
-  // dsh-settings-file); without one the row config applies as above.
-  ctx.inject(['settings'], (sctx) => {
-    const scope = sctx.settings.register('dsh-pwa-notify', SettingsSchema, {
-      base: { turnEndPush: config.turnEnd === true, includeSummary: config.includeSummary === true },
-    })
-    const applyLive = () => {
-      const value = scope.get()
-      cfg.approvalEnabled = value.approvalPush !== false
-      cfg.questionEnabled = value.questionPush !== false
-      cfg.turnEndEnabled = value.turnEndPush === true
-      cfg.errorEnabled = value.errorPush !== false
-      cfg.goalEnabled = value.goalPush !== false
-      cfg.jobEnabled = value.jobPush !== false
-      cfg.includeSummary = value.includeSummary === true
-      cfg.mutedWorkspaces = Array.isArray(value.mutedWorkspaces)
-        ? value.mutedWorkspaces.filter((p) => typeof p === 'string' && p !== '')
-        : []
-    }
-    applyLive()
-    scope.watch(applyLive)
-  })
+  // DSH ≥ 0.1.7: the settings service surfaces profile entries through the
+  // owning plugin's Config schema (volatile fields are live-editable, no
+  // registration and no scope.watch). The reads happen through the cfg
+  // getters above; there is nothing to wire here.
 
   // Real Web Push state (VAPID keys + subscriptions). With the poll channel
   // gone this is THE notification transport: an unavailable state dir or no
@@ -1146,21 +1169,37 @@ export function apply(ctx, config = {}) {
   }
 
   // --- Background job settlement leg ----------------------------------------
-  // jobs.onJobDone fires per settlement; we push completed/failed only —
-  // `killed` is user-initiated (they know) and `running` is not a settlement.
+  // DSH ≥ 0.1.7: jobs.onJobDone is gone; the registry's event stream carries
+  // a `settled` event per settlement. We push completed/failed only — `killed`
+  // is user-initiated (they know) and live statuses are not settlements.
+  // The owner is a SessionId (not an object): the sessions store resolves it
+  // for the workspace mute; an unowned job cannot be attributed and keeps
+  // notifying.
+  let sessionStore = null
+  try {
+    ctx.inject(['sessions'], (sctx) => {
+      sessionStore = sctx.sessions
+      sctx.effect(() => () => { sessionStore = null }, 'dsh-pwa-notify: sessions store')
+    })
+  } catch (e) {
+    console.warn(`[dsh-pwa-notify] cannot observe "sessions": ${String((e && e.message) || e)}`)
+  }
   ctx.inject(['jobs'], (jobsCtx) => {
+    const events = jobsCtx.jobs && jobsCtx.jobs.events
+    if (!events || typeof events.subscribe !== 'function') return
     jobsCtx.effect(
       () =>
-        jobsCtx.jobs.onJobDone((snapshot, owner) => {
-          if (!snapshot) return
-          if (snapshot.status !== 'completed' && snapshot.status !== 'failed') return
-          // The owner agent attributes the job to a workspace for the mute;
-          // an unowned job cannot be attributed and keeps notifying.
+        events.subscribe({ owners: 'all' }, (event) => {
+          if (!event || event.type !== 'settled') return
+          const job = event.job
+          if (!job) return
+          if (job.status !== 'completed' && job.status !== 'failed') return
+          const session = job.owner !== undefined ? sessionStore && sessionStore.get(job.owner) : undefined
           fire({
             kind: 'job',
-            label: snapshot.label || snapshot.id || '任务',
-            status: snapshot.status,
-            cwd: cwdOf(owner && owner.session),
+            label: job.label || job.id || '任务',
+            status: job.status,
+            cwd: cwdOf(session),
           })
         }),
       'dsh-pwa-notify: job settlement',
@@ -1180,7 +1219,7 @@ export function apply(ctx, config = {}) {
       fire({
         kind: 'turn-end',
         delegationDepth: header.delegationDepth,
-        summary: cfg.includeSummary ? turnSummary(session.events, payload && payload.turn) : '',
+        summary: cfg.includeSummary ? turnSummary(eventsOf(session), payload && payload.turn) : '',
         cwd: cwdOf(session),
       })
     })
